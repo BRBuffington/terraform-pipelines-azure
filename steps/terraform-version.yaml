@@ -1,0 +1,32 @@
+parameters:
+  - name: terraform_version
+    type: string
+    default: 1.0.3 # Will be ignored if .terraform-version file exist
+
+  - name: working_dir
+    type: string
+    default: "$(System.DefaultWorkingDirectory)/infra"
+
+steps:
+  # Get the terraform cli version from .terraform-version file
+  - pwsh: |
+      if (test-path -path .\.terraform-version){
+        $terraformVersion = Get-Content -Path ".\.terraform-version"
+      } else {
+        $terraformVersion = "${{ parameters.terraform_version }}"
+      }
+
+      # Output variables that can be used outside of this job (like different stages or pipelines)
+      Write-Host "##vso[task.setvariable variable=terraform_version;isOutput=true;]$terraformVersion"
+
+      # Pipeline variables, only accessible by existing run
+      Write-Host "##vso[task.setvariable variable=terraform_version;]$terraformVersion"
+    workingDirectory: ${{ parameters.working_dir }}
+    displayName: "Version: Get Terraform Version"
+
+  # Install Terraform based on version variable
+  - task: JasonBJohnson.azure-pipelines-tasks-terraform.azure-pipelines-tasks-terraform-installer.TerraformInstaller@1
+    displayName: "Version: Install Terraform"
+    inputs:
+      workingDirectory: ${{ parameters.working_dir }}
+      terraformVersion: $(terraform_version)

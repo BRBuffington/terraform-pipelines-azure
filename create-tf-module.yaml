@@ -1,0 +1,145 @@
+# Reference: https://stephenallwright.com/project-template-repository-azure-devops/
+# Quick & dirty, this should be refactored - terraform, ansible, or at least make this code idempotent
+
+parameters:
+  - name: module_name
+    displayName: Module Name
+    type: string
+    default: ""
+
+  - name: org_name
+    displayName: AzDO Organization Name
+    type: string
+    default: GuggenheimPartners
+
+  - name: project_name
+    displayName: AzDO Project Name
+    type: string
+    default: SS-Terraform-Modules
+
+  - name: pat
+    type: string
+    default: $(AZDO_PAT)
+
+  - name: pool
+    type: object
+    default:
+      vmImage: ubuntu-latest
+
+jobs:
+  - job: create_tf_module
+    displayName: "Module - ${{ parameters.module_name }}"
+    pool: ${{ parameters.pool }}
+    steps:
+      # Add the devops extension
+      - script: az extension add -n azure-devops
+        displayName: "Install Azure DevOps Extension"
+
+      # Create the repo
+      - pwsh: |
+          $module_name = "${{ parameters.module_name }}".Trim().ToLower()
+          $module_name_parsed = $module_name.Split("-")
+
+          # Must always start with terraform
+          if ($module_name_parsed[0] -ne "terraform"){
+            Throw "Incorrect naming convention. Please follow terraform-[provider]-[module]"
+          }
+
+          # Must at least have 3 blocks
+          if ($module_name_parsed.count -lt 3){
+            Throw "Incorrect naming convention. Please follow terraform-[provider]-[module]"
+          }
+
+          # Check if the repo already exist
+          $Repo = az repos show -r $module_name --project "${{ parameters.project_name }}" --org https://dev.azure.com/${{ parameters.org_name }}
+
+          if ([string]::IsNullOrEmpty($Repo)){
+            # Create new empty repo
+            $Repo = az repos create --name "$module_name" --organization https://dev.azure.com/${{ parameters.org_name }} --project "${{ parameters.project_name }}"
+
+            # Set your git config email and user
+            git config --global user.email "noreply@guggenheimpartners.com"
+            git config --global user.name "IT Cloud Engineering"
+            git config --global init.defaultBranch "main"
+
+            # Let's clean up before pushing
+            Remove-Item -Recurse -Force .git
+            Remove-Item -Recurse -Force .azuredevops/DONOTCOPY
+
+            # Commit changes
+            git init
+            git add .
+            git commit -am "Cloned from zzTemplate.Modules repository"
+
+            # Add new remote
+            git remote add origin "https://${{ parameters.pat }}@dev.azure.com/GuggenheimPartners/${{ parameters.project_name }}/_git/$module_name"
+
+            # Push the changes
+            git push -u origin --all
+          } else {
+            Write-Host "Repository already exist. Skipping."
+          }
+
+          # Let's change the default branch
+          az repos update --repository "$module_name" --default-branch "main" --organization https://dev.azure.com/${{ parameters.org_name }} --project "${{ parameters.project_name }}"
+
+          # Get Results
+          $Repo = $Repo | ConvertFrom-Json
+          $ID = $Repo.Id
+
+          Write-Host "##vso[task.setvariable variable=repo_id;]$Id"
+          Write-Host "##vso[task.setvariable variable=repo_name;]$module_name"
+        displayName: "Creating repo from template"
+        env:
+          AZURE_DEVOPS_EXT_PAT: ${{ parameters.pat }}
+
+      - pwsh: |
+          # Terraform Module CICD
+          $PIPELINE_TF_CICD = az pipelines list --name "${ENV:REPO_NAME} CICD" --project "${{ parameters.project_name }}" --org https://dev.azure.com/${{ parameters.org_name }}
+
+          if ($PIPELINE_TF_CICD -eq '[]'){
+            $PIPELINE_TF_CICD = az pipelines create --repository-type "tfsgit" --repository "${ENV:REPO_NAME}" --name "${ENV:REPO_NAME} CICD" --description 'Terraform Module CICD' --folder-path "${ENV:REPO_NAME}" --yaml-path ".azuredevops/terraform-module-cicd.yaml" --branch "main" --skip-first-run
+          }
+
+          $PIPELINE_TF_CICD = $PIPELINE_TF_CICD | ConvertFrom-Json
+          $PIPELINE_TF_CICD
+
+          # Terraform Validate
+          $PIPELINE_TF_Validate = az pipelines list --name "${ENV:REPO_NAME} Validate" --project "${{ parameters.project_name }}" --org https://dev.azure.com/${{ parameters.org_name }}
+
+          if ($PIPELINE_TF_Validate -eq '[]'){
+            $PIPELINE_TF_Validate = az pipelines create --repository-type "tfsgit" --repository "${ENV:REPO_NAME}" --name "${ENV:REPO_NAME} Validate" --description 'Terraform Module Validate' --folder-path "${ENV:REPO_NAME}" --yaml-path ".azuredevops/terraform-module-validate.yaml" --branch "main" --skip-first-run
+          }
+
+          $PIPELINE_TF_Validate = $PIPELINE_TF_Validate | ConvertFrom-Json
+          $PIPELINE_TF_Validate
+
+          $ID = $PIPELINE_TF_CICD.Id
+          Write-Host "##vso[task.setvariable variable=tf_cicd_pipeline_id;]$Id"
+        displayName: "Creating Terraform Pipelines"
+        env:
+          AZURE_DEVOPS_EXT_PAT: ${{ parameters.pat }}
+
+      - pwsh: |
+          # Check Policy
+          $Policy = az repos policy list --project ${{ parameters.project_name }} --org https://dev.azure.com/${{ parameters.org_name }} --branch ${ENV:BRANCH} --repository-id ${ENV:REPO_ID}
+          $Policy = $Policy | ConvertFrom-Json
+
+          # Build Validation
+          Write-Host "Phase: Build Validation"
+          $build_id = ($Policy | Where-Object -FilterScript {$_.type.displayName -ieq 'Build'}).Id
+          if (!([string]::IsNullOrEmpty($build_id))){
+            az repos policy build update --id $build_id --enabled true --blocking true --branch ${ENV:BRANCH} --repository-id ${ENV:REPO_ID} --build-definition-id ${ENV:TF_PIPELINE_CICD_ID} --display-name 'Terraform Module PR' --manual-queue-only false --queue-on-source-update-only false --valid-duration 0
+          } else {
+            az repos policy build create --enabled true --blocking true --branch ${ENV:BRANCH} --repository-id ${ENV:REPO_ID} --build-definition-id ${ENV:TF_PIPELINE_CICD_ID} --display-name 'Terraform Module PR' --manual-queue-only false --queue-on-source-update-only false --valid-duration 0
+          }
+        displayName: "Creating Branch Policy for main"
+        env:
+          AZURE_DEVOPS_EXT_PAT: ${{ parameters.pat }}
+          REPO_ID: $(repo_id)
+          TF_PIPELINE_CICD_ID: $(tf_cicd_pipeline_id)
+          MIN_APPROVER_COUNT: 1
+          CREATOR_VOTE_COUNTS: false
+          RESET_ON_SOURCE_PUSH: true
+          ACTIVITY_MSG: "Review PR for main"
+          BRANCH: main

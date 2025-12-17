@@ -1,0 +1,122 @@
+parameters:
+  - name: backend_file
+    type: string
+    default: configs/z_backend.tfvars
+
+  - name: working_dir
+    type: string
+    default: "$(System.DefaultWorkingDirectory)/infra"
+
+  - name: terraform_env
+    type: object
+    default: {}
+
+  - name: subscription_based_deployment
+    type: string
+    default: No
+    values:
+      - Yes
+      - No
+
+steps:
+  # Install Terraform
+  - template: terraform-version.yaml
+
+  # Set Variables
+  - ${{ if eq(parameters['subscription_based_deployment'], 'No') }}:
+    - pwsh: |
+        # Get the region from the tfvar name
+        $tb = "$(config)".ToLower()
+        $cf = $tb.split("-").ToLower()
+
+        # Parse the string and get the region and environment alias
+        if($cf.length -gt 1){
+          $reg = $cf[0]
+          $env = $cf[1]
+        } else {
+          Write-Host "##vso[task.logissue type=error]$config | Format must be [region alias]-[environment alias][-designator (optional)]"
+          Write-Host "##vso[task.complete result=Failed;]$config | Format must be [region alias]-[environment alias][-designator (optional)]"
+        }
+
+        # Normalize the environment alias
+        $EnvValues = "sb","dev","tst","si","qa","uat","prd","dr"
+        $pattern = "[^$([regex]::Escape($EnvValues -join ''))]"
+
+        $env_alias = $env -replace $pattern
+
+        # Output variables that can be used outside of this job (like different stages or pipelines)
+        Write-Host "##vso[task.setvariable variable=region_alias;isOutput=true;]$reg"
+        Write-Host "##vso[task.setvariable variable=env_alias;isOutput=true;]$env_alias"
+        Write-Host "##vso[task.setvariable variable=sub_based;isOutput=true;]NO"
+
+        # Pipeline variables, only accessible by existing job
+        Write-Host "##vso[task.setvariable variable=region_alias]$reg"
+        Write-Host "##vso[task.setvariable variable=env_alias]$env_alias"
+        Write-Host "##vso[task.setvariable variable=sub_based]NO"
+      displayName: "Init: Set Region & Environment Vars"
+
+  - ${{ if eq(parameters['subscription_based_deployment'], 'Yes') }}:
+    - pwsh: |
+        # All subscription-based deployments will be global and mixed (production)
+        $reg = "global"
+        $env = "mixed"
+
+        # Output variables that can be used outside of this job (like different stages or pipelines)
+        Write-Host "##vso[task.setvariable variable=region_alias;isOutput=true;]$reg"
+        Write-Host "##vso[task.setvariable variable=env_alias;isOutput=true;]$env"
+        Write-Host "##vso[task.setvariable variable=sub_based;isOutput=true;]YES"
+
+        # Pipeline variables, only accessible by existing job
+        Write-Host "##vso[task.setvariable variable=region_alias]$reg"
+        Write-Host "##vso[task.setvariable variable=env_alias]$env"
+        Write-Host "##vso[task.setvariable variable=sub_based]YES"
+      displayName: "Init: Set Region & Environment Vars (Sub-Based)"
+
+  # Let's check that the terraform code is formatted correctly first
+  - task: JasonBJohnson.azure-pipelines-tasks-terraform.azure-pipelines-tasks-terraform-cli.TerraformCLI@1
+    displayName: "Init: Terraform fmt"
+    inputs:
+      command: fmt
+      workingDirectory: ${{ parameters.working_dir }}
+      allowTelemetryCollection: false
+
+  # Replace the tokens with actual values from pipeline variables
+  # These replacements should be minimized, either put them in version control or for secrets, KeyVault
+  - task: qetza.replacetokens.replacetokens-task.replacetokens@6
+    displayName: "Init: Update Variables"
+    inputs:
+      targetFiles: |
+        **/z_common.tfvars
+        **/$(config).tfvars
+        **/z_tags.yaml
+      missingVarAction: keep
+      missingVarLog: error
+      tokenPattern: octopus
+      telemetryOptout: true
+      root: ${{ parameters.working_dir }}
+
+  - ${{ if eq(variables['System.Debug'], 'true') }}:
+    - script: |
+        printenv
+        ls -R
+      displayName: "Init: DEBUG"
+      condition: always()
+
+  # Terraform Init
+  - task: JasonBJohnson.azure-pipelines-tasks-terraform.azure-pipelines-tasks-terraform-cli.TerraformCLI@1
+    displayName: "Init: Terraform init"
+    env: ${{ parameters.terraform_env }}
+    inputs:
+      command: init
+      workingDirectory: ${{ parameters.working_dir }}
+      commandOptions: "-backend-config=${{ parameters.backend_file }} -input=false"
+      backendType: selfConfigured
+      allowTelemetryCollection: false
+
+  # Select the workspace (create if it does not exist)
+  - pwsh: |
+      $config = "$(config)".ToLower()
+      terraform workspace select "$config" || terraform workspace new "$config"
+    displayName: "Init: Setting workspace to $(config)"
+    workingDirectory: ${{ parameters.working_dir }}
+    env: ${{ parameters.terraform_env }}

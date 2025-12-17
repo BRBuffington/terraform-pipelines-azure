@@ -1,0 +1,51 @@
+parameters:
+  - name: yor_version
+    type: string
+    default: 0.1.183 # This will be ignored if another version is already installed
+
+  - name: include_trace
+    type: string
+    default: "no"
+
+  - name: working_dir
+    type: string
+    default: "$(System.DefaultWorkingDirectory)/infra"
+
+steps:
+  # NOTES
+  # There currently seems to be a bug with either windows file system or yor
+  # If using Windows Agents, yor does not detect the .git directory properly, and as such not adding the relevant git tags
+  - pwsh: |
+      # Check if yor already exist, if not download and use it
+      if (!(Get-Command "yor" -ErrorAction SilentlyContinue)){
+          $ProgressPreference = 'SilentlyContinue'
+
+          # Get Yor
+          if ("$(Agent.OS)" -ieq "Windows_NT"){
+            Invoke-WebRequest -Uri https://github.com/bridgecrewio/yor/releases/download/${{ parameters.yor_version }}/yor_${{ parameters.yor_version }}_windows_amd64.zip -OutFile yor.zip
+
+            # Extract
+            Expand-Archive -Path ./yor.zip -DestinationPath . -Force
+          } else {
+            Invoke-WebRequest -Uri https://github.com/bridgecrewio/yor/releases/download/${{ parameters.yor_version }}/yor_${{ parameters.yor_version }}_linux_amd64.tar.gz -OutFile yor_${{ parameters.yor_version }}_linux_amd64.tar.gz
+
+            tar -xzf yor_${{ parameters.yor_version }}_linux_amd64.tar.gz yor
+          }
+
+          $YOR = "./yor"
+      } else {
+        $YOR = "yor"
+      }
+
+      if ("${{ parameters.include_trace }}" -ieq 'yes' ) {
+        & $YOR tag --tag-groups external,simple,git,code2cloud --config-file "./configs/z_tags.yaml" -d . --skip-dirs .azure-pipelines,configs,scripts,yor
+      } else {
+        & $YOR tag --tag-groups external,simple,git --config-file "./configs/z_tags.yaml" -d . --skip-dirs .azure-pipelines,configs,scripts,yor
+      }
+
+      # Delete the temp files if they still exist
+      if (Test-Path ".\temp.*"){
+        Remove-Item ".\temp.*.tf" -Force
+      }
+    workingDirectory: ${{ parameters.working_dir }}
+    displayName: "Yor: Dynamic Tagging"

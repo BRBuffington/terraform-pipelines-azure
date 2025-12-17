@@ -1,0 +1,123 @@
+parameters:
+  - name: conftest_version
+    type: string
+    default: 0.28.1 # This will be ignored if another version is already installed
+
+  - name: working_dir
+    type: string
+    default: "$(System.DefaultWorkingDirectory)/infra"
+
+  - name: phase
+    type: string
+    default: pre-plan
+
+  - name: policy_branch_name
+    type: string
+    default: main
+
+  - name: policy_repo_org
+    type: string
+    default: GuggenheimPartners
+
+  - name: policy_repo_project
+    type: string
+    default: SS-IaC-Management
+
+  - name: policy_repo_name
+    type: string
+    default: terraform-opa-policies
+
+steps:
+  - ${{ if ne(parameters.phase, 'pre-plan') }}:
+    - pwsh: |
+        # Create a HashTable
+        $opa_input = @{}
+
+        # Let's get the tfplan
+        if (Test-Path "$(config).tfplan.json"){
+          $tfplan = Get-content "$(config).tfplan.json" -Raw | ConvertFrom-Json
+          $opa_input += @{"tfplan" = $tfplan }
+        }
+
+        # Let's convert the environment variables to json
+        $tfrun = Get-Item -Path env:* | % {$hash = @{}} {$hash[$_.Name]=$_.Value} {$hash}
+        $opa_input += @{"tfrun" = $tfrun}
+
+        # Let's create the opa json
+        $opa_input | ConvertTo-Json -Depth 100 | Set-Content "gugg-opa.json"
+
+        Get-Content "gugg-opa.json"
+      workingDirectory: ${{ parameters.working_dir }}
+      displayName: "Policies: Generate OPA JSON"
+
+  # Run Conftest (OPA)
+  - pwsh: |
+      # Check if conftest already exist, if not, download and use it
+      if (!(Get-Command "conftest" -ErrorAction SilentlyContinue)){
+        # Let's check if we need to download
+        if (!(Test-Path "./conftest")){
+          $ProgressPreference = 'SilentlyContinue'
+          # Get Conftest
+          if ("$(Agent.OS)" -ieq "Windows_NT"){
+            Invoke-WebRequest -Uri "https://github.com/open-policy-agent/conftest/releases/download/v${{ parameters.conftest_version }}/conftest_${{ parameters.conftest_version }}_Windows_x86_64.zip" -OutFile conftest.zip
+            # Extract
+            Expand-Archive -Path ./conftest.zip -DestinationPath . -Force
+          } else {
+            Invoke-WebRequest -Uri "https://github.com/open-policy-agent/conftest/releases/download/v${{ parameters.conftest_version }}/conftest_${{ parameters.conftest_version }}_Linux_x86_64.tar.gz" -OutFile conftest.tar.gz
+            tar -xzf conftest.tar.gz conftest
+          }
+        }
+
+        $CONFTEST = "./conftest"
+      } else {
+        $CONFTEST = "conftest"
+      }
+
+      # Let's make the config upper-case
+      # Config is a pipeline variable, and is passed at the job level
+      $CONFIG_NAME = '$(config)'.ToUpper()
+
+      # Download the policies, this requires the git creds to be set up, so make sure git-config.yaml is called within the azdo job!
+      & $CONFTEST pull git::https://dev.azure.com/${{ parameters.policy_repo_org }}/${{ parameters.policy_repo_project }}/_git/${{ parameters.policy_repo_name }}?ref=${{ parameters.policy_branch_name }}
+
+      if (Test-Path -Path "./policy"){
+        $policy_folder = "policy"
+        if ("$ENV:IsDebugOn" -ieq "true"){$policy_output = "table"} else {$policy_output = "stdout"}
+
+        if ("${{ parameters.phase }}" -ieq "pre-plan"){
+          if (Test-Path "policy/pre-plan/"){$policy_folder = "policy/pre-plan/"}
+          'Policy Check (Pre-Plan)' | tee -a "conftest_$($CONFIG_NAME)"
+
+          $(& $CONFTEST test --policy $policy_folder . --output=$policy_output --data policy/shared-data.yaml --ignore '^([^.]+|.*.xml|.*.md|.gitignore|.azure-pipelines?.*|.terraform?.*|policy?.*|documentation?.*|docs?.*|scripts?.*)$' --all-namespaces --fail-on-warn; $EXITCODE = $LASTEXITCODE) | tee -a "conftest_$($CONFIG_NAME)"
+        } else {
+          if (Test-Path "policy/post-plan/"){$policy_folder = "policy/post-plan/"}
+          'Policy Check (Post-Plan)' | tee -a "conftest_$($CONFIG_NAME)"
+
+          $(& $CONFTEST test --policy $policy_folder "gugg-opa.json" --output=$policy_output --data policy/shared-data.yaml --all-namespaces --fail-on-warn; $EXITCODE = $LASTEXITCODE) | tee -a "conftest_$($CONFIG_NAME)"
+        }
+
+        # Conftest exit codes:
+        # Exit code of 0: No failures or warnings.
+        # Exit code of 1: No failures, but there exists at least one warning.
+        # Exit code of 2: At least one failure.
+        if ($EXITCODE -eq 2){
+          Write-Host "##vso[task.setvariable variable=POLICY_CHECK_FAILED;]true"
+          Write-Host "##vso[task.logissue type=error]$CONFIG_NAME | Policy violation detected, please check violations here"
+          Write-Host "##vso[task.complete result=Failed;]$CONFIG_NAME | Policy violation detected, please check violations here"
+        } elseif (($EXITCODE -eq 0) -or ($EXITCODE -eq 1)) {
+          Write-Host "##vso[task.setvariable variable=POLICY_CHECK_FAILED;]false"
+        } else {
+          Write-Host "##vso[task.setvariable variable=POLICY_CHECK_FAILED;]true"
+          Write-Host "##vso[task.logissue type=error]$CONFIG_NAME | Policy check failed!"
+          Write-Host "##vso[task.complete result=Failed;]$CONFIG_NAME | Policy check failed!"
+        }
+      } else {
+        Write-Host "##vso[task.setvariable variable=POLICY_CHECK_FAILED;]true"
+        Write-Host "##vso[task.logissue type=error]$CONFIG_NAME | Policy folder not detected!"
+        Write-Host "##vso[task.complete result=Failed;]$CONFIG_NAME | Policy folder not detected!"
+      }
+    workingDirectory: ${{ parameters.working_dir }}
+    displayName: "Policies: Check (${{ parameters.phase }})"
+    ignoreLASTEXITCODE: true
+    env:
+      IsDebugOn: $(SYSTEM.DEBUG)

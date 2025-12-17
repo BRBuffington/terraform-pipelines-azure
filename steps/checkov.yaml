@@ -1,0 +1,48 @@
+parameters:
+  - name: working_dir
+    type: string
+    default: "$(System.DefaultWorkingDirectory)/infra"
+
+  - name: terraform_env
+    type: object
+    default: {}
+
+steps:
+  # # Define your Python version
+  # - task: UsePythonVersion@0
+  #   displayName: "Checkov: Use Python 3.x"
+  #   condition: eq(variables['SkipUsePythonVersionTask'], '')
+  #   inputs:
+  #     versionSpec: "3.x"
+  #     architecture: "x64"
+
+  # # Install checkov
+  # - script: "pip install checkov"
+  #   displayName: "Checkov: Installation"
+
+  # We're separating terraform show from checkov
+  # This way, checkov will not have access to the azure variables
+  - script: |
+      terraform show -json $(config).tfplan > $(config).tfplan.json
+    workingDirectory: ${{ parameters.working_dir }}
+    env: ${{ parameters.terraform_env }}
+    displayName: "Checkov: Get JSON Plan"
+
+  # # This will always return as successful so the pipeline will not fail
+  # # Phase 2, we'll need to implement a way to fail builds if the check is not remediated or skipped with comments in code
+  # - script: |
+  #     checkov -f $(config).tfplan.json -o junitxml > ${{ parameters.working_dir }}/checkov-plan-report-$(config).xml || true
+  #   workingDirectory: ${{ parameters.working_dir }}
+  #   displayName: "Checkov: Analyze"
+
+  # # Publish checkov results
+  # - task: PublishTestResults@2
+  #   displayName: "Checkov: Publish Results"
+  #   inputs:
+  #     mergeTestResults: true
+  #     searchFolder: ${{ parameters.working_dir }}
+  #     testResultsFiles: "**/checkov-*.xml"
+  #     ${{ if eq(variables['SYSTEM.JOBATTEMPT'], '1') }}:
+  #       testRunTitle: "Checkov: $(config)"
+  #     ${{ else }}:
+  #       testRunTitle: "Checkov (Attempt $(SYSTEM.JOBATTEMPT)): $(config)"

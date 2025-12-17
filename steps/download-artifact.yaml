@@ -1,0 +1,31 @@
+steps:
+  # Publish Artifact
+  - task: DownloadPipelineArtifact@2
+    displayName: "Artifact: Download"
+    inputs:
+      targetPath: "$(AGENT.TEMPDIRECTORY)/$(SYSTEM.JOBID)"
+
+  # Get the latest artifact published for the config
+  # We have the artifacts appended with a timestamp
+  - pwsh: |
+      if (Test-Path "*$(config)*"){
+        $artifact_name = Get-ChildItem -Include "*$(config)-*" -name | Sort-Object -Descending | Select-Object -First 1
+      } else {
+        Throw "Artifacts for $(config) not found"
+      }
+      Write-Host "##vso[task.setvariable variable=artifact_name;]$artifact_name"
+    displayName: "Artifact: Get Latest"
+    workingDirectory: "$(AGENT.TEMPDIRECTORY)/$(SYSTEM.JOBID)"
+
+  # Let's put it on our working directory
+  - task: CopyFiles@2
+    displayName: "Artifact: Prep Working Directory"
+    inputs:
+      Contents: |
+        **/*
+      TargetFolder: "$(System.DefaultWorkingDirectory)"
+      SourceFolder: "$(AGENT.TEMPDIRECTORY)/$(SYSTEM.JOBID)/$(artifact_name)"
+      OverWrite: true
+      delayBetweenRetries: 2000
+      retryCount: 5
+      CleanTargetFolder: true

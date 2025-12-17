@@ -1,0 +1,265 @@
+parameters:
+  - name: pre_run_steps
+    type: stepList
+    default: []
+
+  - name: apply_pre_run_steps
+    type: stepList
+    default: []
+
+  - name: apply_post_run_steps
+    type: stepList
+    default: []
+
+  - name: plan_pre_run_steps
+    type: stepList
+    default: []
+
+  - name: plan_post_run_steps
+    type: stepList
+    default: []
+
+  - name: config
+    type: string
+    default: ""
+
+  - name: pool
+    type: object
+    default:
+      vmImage: ubuntu-latest
+
+  - name: backend_file
+    type: string
+    default: configs/z_backend.tfvars
+
+  - name: allowed_branches
+    type: object
+    default: []
+
+  - name: working_dir
+    type: string
+    default: "$(System.DefaultWorkingDirectory)/infra"
+
+  - name: depends_on
+    type: object
+    default: []
+
+  - name: pat
+    type: string
+    default: ""
+
+  - name: terraform_env
+    type: object
+    default: {}
+
+  - name: destroy
+    type: boolean
+    default: false
+
+  - name: pause_timeout_mins
+    type: number
+    default: 5760
+
+  - name: apply_timeout_mins
+    type: number
+    default: 60
+
+  - name: deployment_environment
+    type: string
+    default: "sb"
+
+  - name: subscription_based_deployment
+    type: string
+    default: No
+    values:
+      - Yes
+      - No
+
+stages:
+  - stage: ${{ replace(parameters.config, '-', '_') }}
+    displayName: "Release ${{ upper(parameters.config) }}"
+    ${{ if ne(length(parameters.depends_on), 0) }}:
+      dependsOn:
+        ${{ parameters.depends_on }}
+    jobs:
+      - job: pre_deploy
+        displayName: "Pre-Deploy"
+        variables:
+          config: ${{ parameters.config }}
+          DISABLE_NODE6_DEPRECATION_WARNING: true
+        pool: ${{ parameters.pool }}
+        steps:
+          # We're downloading the code from the artifact
+          - checkout: none
+
+          # Checks
+          - ${{ if eq(parameters['subscription_based_deployment'], 'No') }}:
+            - template: ../steps/config-checks.yaml
+
+          # Download pipeline artifact
+          - template: ../steps/download-artifact.yaml
+            parameters:
+              artifact_prefix: $(config)
+
+          # Load the pipeline variables
+          - pwsh: "cat pipeline-vars.txt"
+            workingDirectory: ${{ parameters.working_dir }}
+            displayName: "Set Pipeline Variables"
+            name: pipeline_vars
+
+      # Pause before apply
+      - job: pause
+        displayName: Pause
+        dependsOn: pre_deploy
+        condition: |
+          and(
+            eq(dependencies.pre_deploy.outputs['pipeline_vars.TERRAFORM_PLAN_HAS_CHANGES'], 'true'),
+            succeeded()
+          )
+        pool: server
+        timeoutInMinutes: ${{ parameters.pause_timeout_mins }} #5760 # job times out in 4 days
+        steps:
+          - task: ManualValidation@0
+            timeoutInMinutes: 4320 # task times out in 3 days
+            inputs:
+              notifyUsers: |
+                $(BUILD.REQUESTEDFOREMAIL)
+              instructions: "Please review the terraform plan before resuming..."
+              onTimeout: 'reject'
+              enabled: true
+
+      # Terraform Apply
+      - deployment: deploy
+        displayName: "Deployment"
+        dependsOn:
+          - pre_deploy
+          - pause
+        condition: |
+          and(
+            eq(dependencies.pre_deploy.outputs['pipeline_vars.TERRAFORM_PLAN_HAS_CHANGES'], 'true'),
+            in(dependencies.pre_deploy.result, 'Succeeded', 'SucceededWithIssues'),
+            succeeded()
+          )
+        variables:
+          config: ${{ parameters.config }}
+          DISABLE_NODE6_DEPRECATION_WARNING: true
+        pool: ${{ parameters.pool }}
+        environment: ${{ upper(parameters.deployment_environment) }}
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                # We're downloading the code from the artifact
+                - checkout: none
+
+                # Run the pre-run steps (Same for plan and apply)
+                - ${{ parameters.pre_run_steps }}
+
+                # Git Configs
+                - template: ../steps/git-config.yaml
+                  parameters:
+                    pat: ${{ parameters.pat }}
+
+                # Download pipeline artifact
+                - template: ../steps/download-artifact.yaml
+                  parameters:
+                    artifact_prefix: $(config)
+
+                # Run the pre-run steps
+                - ${{ parameters.apply_pre_run_steps }}
+
+                # Load the pipeline variables
+                - script: "cat pipeline-vars.txt"
+                  workingDirectory: ${{ parameters.working_dir }}
+                  displayName: "Init: Set Pipeline Variables"
+
+                # Initialize Terraform
+                - template: ../steps/terraform-init.yaml
+                  parameters:
+                    backend_file: ${{ parameters.backend_file }}
+                    working_dir: ${{ parameters.working_dir }}
+                    terraform_env: ${{ parameters.terraform_env }}
+                    subscription_based_deployment: ${{ parameters.subscription_based_deployment }}
+
+                # Dynamically Tag Resources
+                - template: ../steps/tagging.yaml
+                  parameters:
+                    working_dir: ${{ parameters.working_dir }}
+
+                # Terraform Apply
+                - task: JasonBJohnson.azure-pipelines-tasks-terraform.azure-pipelines-tasks-terraform-cli.TerraformCLI@1
+                  displayName: "Deploy: Terraform Apply"
+                  env: ${{ parameters.terraform_env }}
+                  timeoutInMinutes: ${{ parameters.apply_timeout_mins }}
+                  inputs:
+                    command: apply
+                    workingDirectory: ${{ parameters.working_dir }}
+                    commandOptions: "-no-color $(config).tfplan"
+
+      - job: post_deploy
+        displayName: "Post-Deploy"
+        dependsOn:
+          - deploy
+        condition: |
+          or(
+            succeeded(),
+            eq(variables.RunPostDeploy, 'true')
+          )
+        variables:
+          config: ${{ parameters.config }}
+          DISABLE_NODE6_DEPRECATION_WARNING: true
+        pool: ${{ parameters.pool }}
+        steps:
+          # We're downloading the code from the artifact
+          - checkout: none
+
+          # Git Configs
+          - template: ../steps/git-config.yaml
+            parameters:
+              pat: ${{ parameters.pat }}
+              
+          # Run the pre-run steps (Same for plan and apply)
+          - ${{ parameters.pre_run_steps }}
+
+          # Download pipeline artifact
+          - template: ../steps/download-artifact.yaml
+            parameters:
+              artifact_prefix: $(config)
+
+          # Load the pipeline variables
+          - script: "cat pipeline-vars.txt"
+            workingDirectory: ${{ parameters.working_dir }}
+            displayName: "Init: Set Pipeline Variables"
+
+          # Initialize Terraform
+          - template: ../steps/terraform-init.yaml
+            parameters:
+              backend_file: ${{ parameters.backend_file }}
+              working_dir: ${{ parameters.working_dir }}
+              terraform_env: ${{ parameters.terraform_env }}
+              subscription_based_deployment: ${{ parameters.subscription_based_deployment }}
+
+          # Dynamically Tag Resources
+          - template: ../steps/tagging.yaml
+            parameters:
+              working_dir: ${{ parameters.working_dir }}
+
+          # This will export all the outputs as pipeline variables (TF_OUT_*)
+          - task: JasonBJohnson.azure-pipelines-tasks-terraform.azure-pipelines-tasks-terraform-cli.TerraformCLI@1
+            displayName: 'Post-job: Terraform Output'
+            env: ${{ parameters.terraform_env }}
+            inputs:
+              command: output
+              workingDirectory: ${{ parameters.working_dir }}
+              allowTelemetryCollection: false
+
+          # Run the post-run steps
+          - ${{ parameters.apply_post_run_steps }}
+
+          # Post-Deploy Plan
+          - template: ../steps/terraform-plan.yaml
+            parameters:
+              working_dir: ${{ parameters.working_dir }}
+              terraform_env: ${{ parameters.terraform_env }}
+              destroy: ${{ parameters.destroy }}
+              post_deployment: "yes"

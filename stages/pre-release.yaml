@@ -1,0 +1,44 @@
+parameters:
+  - name: pool
+    type: object
+    default:
+      vmImage: ubuntu-latest
+
+stages:
+  - stage: pre_release
+    displayName: "Pre-Release"
+    condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+    jobs:
+      - job: cancel_previous_builds
+        displayName: "Cancel Previous Builds"
+        pool: ${{ parameters.pool }}
+        workspace:
+          clean: resources
+        steps:
+          # We don't need the code downloaded
+          - checkout: none
+
+          # Cancel any previous builds for the current pipeline and source branch
+          # This will require the Project's Build Service Account to have 'Stop builds' permissions
+          - pwsh: |
+              # Get list of pending builds
+              $url = "$(SYSTEM.TASKDEFINITIONSURI)$(SYSTEM.TEAMPROJECTID)/_apis/build/builds?definitions=$(SYSTEM.DEFINITIONID)&statusFilter=notStarted,inProgress,cancelling"
+              $builds = Invoke-RestMethod -Uri $url -Method Get -Header @{Authorization = "Bearer $(System.AccessToken)"}
+
+              # Let's filter to only those on existing source branch and not the current build
+              $buildsToStop = ($builds.value.Where({ ($_.sourceBranch -eq "$(Build.SourceBranch)") -and ($_.id -ne "$(Build.BuildId)") })).id
+
+              # Cancel each previous pending builds
+              ForEach($BuildID in $buildsToStop)
+              {
+                  Write-Host "Canceling build $BuildID..."
+                  Write-Host "$(SYSTEM.TASKDEFINITIONSURI)$(SYSTEM.TEAMPROJECT)/_build/results?buildId=$($BuildID)"
+
+                  # API URL
+                  $url = "$(SYSTEM.TASKDEFINITIONSURI)$(SYSTEM.TEAMPROJECTID)/_apis/build/builds/$($BuildID)?api-version=6.0"
+
+                  $body = @{status="Cancelling"} | ConvertTo-Json -Compress
+                  Invoke-RestMethod -Uri $url -Method Patch -Body $body -Headers @{Authorization = "Bearer $(System.AccessToken)"} -ContentType application/json
+              }
+            displayName: "Pre-Release: Cancel Previous Builds"
+            continueOnError: true # Best effort, will continue even if this fails

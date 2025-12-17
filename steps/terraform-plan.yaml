@@ -1,0 +1,128 @@
+parameters:
+  - name: release
+    type: boolean
+    default: false
+
+  - name: artifact_drop
+    type: string
+    default: $(Build.ArtifactStagingDirectory)
+
+  - name: working_dir
+    type: string
+    default: "$(System.DefaultWorkingDirectory)/infra"
+
+  - name: terraform_env
+    type: object
+    default: {}
+
+  - name: destroy
+    type: boolean
+    default: false
+
+  - name: post_deployment
+    type: string
+    default: no
+
+steps:
+  # Generate a name for the plan results
+  - pwsh: |
+      $plan_name = "$(config)".ToUpper()
+
+      if ("${{ parameters.release }}" -ieq 'true'){
+        $plan_name = "Release - $plan_name"
+      }
+
+      if ($(SYSTEM.JOBATTEMPT) -gt 1){
+        $plan_name = "$($plan_name) ($(SYSTEM.JOBATTEMPT))"
+      }
+
+      [System.IO.Path]::GetInvalidFileNameChars() | % {$plan_name = $plan_name.replace($_,' ')}
+
+      Write-Host "##vso[task.setvariable variable=plan_name;]$plan_name"
+      Write-Host "##vso[task.setvariable variable=plan_name;isOutput=true;]$plan_name"
+    workingDirectory: ${{ parameters.working_dir }}
+    displayName: "Plan: Prep"
+    name: plan_name
+
+  - ${{ if eq(variables['System.Debug'], 'true') }}:
+      - script: |
+          printenv
+          ls -R
+        displayName: "Plan: DEBUG"
+        condition: always()
+
+  # Terraform Plan
+  - ${{ if ne(parameters['post_deployment'], 'yes') }}:
+      - pwsh: |
+          # We'll add common tfvars if it exist
+          if ("${{ parameters.destroy }}" -ieq 'true'){
+            $destroy_switch = '-destroy'
+          }
+
+          if ("$(BUILD.REASON)" -ieq "PullRequest") {
+            # This is trade-off as we cannot control PR builds when multiple commits happen in successions and if the lock is in-place, someone will have to break the lease manually
+            # See this github issue for a little context on why this may not be so bad with our use case: https://github.com/hashicorp/terraform/issues/28130,
+            # Azure DevOps will automatically cancel the PR build validation/plan automatically, if an apply is in-progress during this time, the plan output will be stale when you try to deploy it
+
+            $(terraform plan -input=false -var-file="${{ parameters.working_dir }}/configs/z_common.tfvars" -var-file="${{ parameters.working_dir }}/configs/$(config).tfvars" -out="$(config).tfplan" -detailed-exitcode -lock=false $destroy_switch; $EXITCODE = $LASTEXITCODE) | tee '$(plan_name)'
+          } else {
+            $(terraform plan -input=false -var-file="${{ parameters.working_dir }}/configs/z_common.tfvars" -var-file="${{ parameters.working_dir }}/configs/$(config).tfvars" -out="$(config).tfplan" -detailed-exitcode $destroy_switch; $EXITCODE = $LASTEXITCODE) | tee '$(plan_name)'
+          }
+
+          if ($EXITCODE -eq 1){
+            Write-Host "##vso[task.logissue type=error]$(plan_name) | Plan failed, please check the error here or on TF plan tab"
+            Write-Host "##vso[task.complete result=Failed;]$(plan_name) | Plan failed, please check the error here or on TF plan tab"
+          }
+        workingDirectory: ${{ parameters.working_dir }}
+        ${{ if eq(parameters['destroy'], 'true') }}:
+          displayName: "Plan: Terraform plan (Destroy)"
+        ${{ if ne(parameters['destroy'], 'true') }}:
+          displayName: "Plan: Terraform plan"
+        env: ${{ parameters.terraform_env }}
+
+  # Terraform Plan - Speculative - Post-Deployment Check
+  # No plan will be saved
+  - ${{ if and(eq(parameters['post_deployment'], 'yes'),ne(parameters['destroy'], 'true')) }}:
+      - pwsh: |
+          # We'll add common tfvars if it exist
+          if ("${{ parameters.destroy }}" -ieq 'true'){
+            $destroy_switch = '-destroy'
+          }
+
+          $(terraform plan -input=false -var-file="${{ parameters.working_dir }}/configs/z_common.tfvars" -var-file="${{ parameters.working_dir }}/configs/$(config).tfvars" -detailed-exitcode $destroy_switch; $EXITCODE = $LASTEXITCODE)
+
+          if ($EXITCODE -eq 1){
+            Write-Host "##vso[task.logissue type=warning]$(plan_name) | Post-Deployment check failed"
+            Write-Host "##vso[task.complete result=SucceededWithIssues;]$(plan_name) | Post-Deployment check failed"
+          }
+          if ($EXITCODE -eq 2){
+            Write-Host "##vso[task.logissue type=warning]$(plan_name) | Post-Deployment check detected changes!"
+            Write-Host "##vso[task.complete result=SucceededWithIssues;]$(plan_name) | Post-Deployment check detected changes!"
+          }
+        workingDirectory: ${{ parameters.working_dir }}
+        ignoreLASTEXITCODE: true
+        displayName: "Plan: Post-Deploy Check"
+        env: ${{ parameters.terraform_env }}
+
+  # Terraform show - this will allow us to check destroys and output it for better visbility
+  - ${{ if ne(parameters['post_deployment'], 'yes') }}:
+      - task: JasonBJohnson.azure-pipelines-tasks-terraform.azure-pipelines-tasks-terraform-cli.TerraformCLI@1
+        displayName: "Plan: Terraform show (JSON)"
+        env: ${{ parameters.terraform_env }}
+        inputs:
+          command: show
+          workingDirectory: ${{ parameters.working_dir }}
+          allowTelemetryCollection: false
+          inputTargetPlanOrStateFilePath: "$(config).tfplan"
+
+  # Copy the tfplan to the artifact staging directory
+  - ${{ if ne(parameters['post_deployment'], 'yes') }}:
+      - task: CopyFiles@2
+        displayName: "Plan: Save to artifact"
+        inputs:
+          Contents: |
+            $(config).tfplan
+          TargetFolder: "${{ parameters.artifact_drop }}/infra"
+          SourceFolder: ${{ parameters.working_dir }}
+          OverWrite: true
+          retryCount: 5

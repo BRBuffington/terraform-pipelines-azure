@@ -1,0 +1,52 @@
+parameters:
+  - name: working_dir
+    type: string
+    default: "$(System.DefaultWorkingDirectory)/infra"
+
+steps:
+  # Parse the terraform plan stdout & policy results
+  # Attach it to the Terraform Plan View/Tab
+  - pwsh: |
+      # Go through each line of the terraform and parse it
+      $includeLineSwitch = $false
+      foreach ($item in $(cat '$(plan_name)')) {
+          if (-not $includeLineSwitch) {
+              $includeLineSwitch = $item -like "*Terraform will perform the following actions:*"
+
+              # Let's format the line, only called once so it's the first line
+              if ($includeLineSwitch) {
+                $item = "`e[1mTerraform will perform the following actions:`e[0m"
+              }
+          }
+
+          if ($includeLineSwitch) {
+              $content += "`r`n$( $item )"
+
+              if ($item -like "*Plan:* to add, * to change, * to destroy*"){
+                $summary = $item -replace '\x1b\[[0-9;]*m'
+              }
+          }
+
+          if ($item -like "*No changes.*"){
+            $content += "`r`n$( $item )"
+          }
+      }
+
+      # Show the results in the console
+      $content
+
+      # Display some warnings so we can see it on the portal better
+      if ($summary){
+        Write-Host "##vso[task.logissue type=warning;]$(plan_name) | $summary"
+        Write-Host "##vso[task.setvariable variable=TERRAFORM_PLAN_HAS_CHANGES;]true"
+      } else {
+        Write-Host "##vso[task.setvariable variable=TERRAFORM_PLAN_HAS_CHANGES;]false"
+      }
+
+      # Update the output file with what we need
+      $content | Set-Content -Path '$(plan_name)'
+
+      # Publish
+      Write-Host "##vso[task.addattachment type=terraform-plan-results;name=$(plan_name);]${{ parameters.working_dir }}/$(plan_name)"
+    workingDirectory: ${{ parameters.working_dir }}
+    displayName: "Summary: TF Plan & Policies"

@@ -1,0 +1,75 @@
+parameters:
+  - name: pre_run_steps
+    type: stepList
+    default: []
+
+  - name: post_run_steps
+    type: stepList
+    default: []
+
+  - name: pool
+    type: object
+    default:
+      vmImage: ubuntu-latest
+
+  - name: working_dir
+    type: string
+    default: "$(System.DefaultWorkingDirectory)/infra"
+
+  - name: pat
+    type: string
+    default: $(AZDO_PAT)
+
+  - name: terraform_env
+    type: object
+    default: {}
+
+jobs:
+  - job: terraform_validate
+    displayName: "Terraform Validate"
+    pool: ${{ parameters.pool }}
+    steps:
+      # Run the pre-run steps from parameters
+      - ${{ parameters.pre_run_steps }}
+
+      # Git Configs
+      # We need this to set up AzDO PAT to download terraform modules
+      - template: steps/git-config.yaml
+        parameters:
+          pat: ${{ parameters.pat }}
+
+      # Install Terraform
+      - template: steps/terraform-version.yaml
+        parameters:
+          working_dir: ${{ parameters.working_dir }}
+
+      # Terraform fmt check
+      - task: JasonBJohnson.azure-pipelines-tasks-terraform.azure-pipelines-tasks-terraform-cli.TerraformCLI@1
+        displayName: "Check: Terraform Format"
+        inputs:
+          command: fmt
+          workingDirectory: ${{ parameters.working_dir }}
+          allowTelemetryCollection: false
+        env: ${{parameters.terraform_env }}
+
+      # Terraform Init
+      - task: JasonBJohnson.azure-pipelines-tasks-terraform.azure-pipelines-tasks-terraform-cli.TerraformCLI@1
+        displayName: "Check: Terraform Init (No Backend)"
+        inputs:
+          command: init
+          workingDirectory: ${{ parameters.working_dir }}
+          commandOptions: "-backend=false -input=false"
+          backendType: local
+          allowTelemetryCollection: false
+        env: ${{parameters.terraform_env }}
+
+      # Terraform Validate
+      - task: JasonBJohnson.azure-pipelines-tasks-terraform.azure-pipelines-tasks-terraform-cli.TerraformCLI@1
+        displayName: "Check: Terraform Validate"
+        inputs:
+          workingDirectory: ${{ parameters.working_dir }}
+          allowTelemetryCollection: false
+        env: ${{parameters.terraform_env }}
+
+      # Run the post-run steps from parameters
+      - ${{ parameters.post_run_steps }}

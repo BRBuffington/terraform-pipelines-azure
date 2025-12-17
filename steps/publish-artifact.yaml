@@ -1,0 +1,63 @@
+parameters:
+  - name: artifact_drop
+    type: string
+    default: "$(Build.ArtifactStagingDirectory)"
+
+  - name: working_dir
+    type: string
+    default: "$(System.DefaultWorkingDirectory)/infra"
+
+steps:
+  # Let's create a file that will contain the echo commands for our variables
+  # There will be two per variable, one is for the job and the other is set for output (cross-job)
+  # This is used to pass the variables to the other "stages" in the pipeline without inherent dependencies
+  # DO NOT PUT SECRETS AS THESE WILL BE STORED IN PLAIN-TEXT
+  - pwsh: |
+      $lines  = @'
+        # Terraform Plan
+        ##vso[task.setvariable variable=TERRAFORM_PLAN_HAS_CHANGES;isOutput=true;]$(TERRAFORM_PLAN_HAS_CHANGES)
+        ##vso[task.setvariable variable=TERRAFORM_PLAN_HAS_CHANGES;]$(TERRAFORM_PLAN_HAS_CHANGES)
+
+        ##vso[task.setvariable variable=TERRAFORM_PLAN_HAS_DESTROY_CHANGES;isOutput=true;]$(TERRAFORM_PLAN_HAS_DESTROY_CHANGES)
+        ##vso[task.setvariable variable=TERRAFORM_PLAN_HAS_DESTROY_CHANGES;]$(TERRAFORM_PLAN_HAS_DESTROY_CHANGES)
+
+        ##vso[task.setvariable variable=BUILD_REPOSITORY_NAME;isOutput=true;]$(BUILD.REPOSITORY.NAME)
+        ##vso[task.setvariable variable=BUILD_REPOSITORY_NAME;]$(BUILD.REPOSITORY.NAME)
+      '@
+
+      # Append to file
+      $lines -f 'string' | Add-Content -Path ${{ parameters.working_dir }}/pipeline-vars.txt
+
+      # Copy the file to the artifact directory
+      cp ${{ parameters.working_dir }}/pipeline-vars.txt ${{ parameters.artifact_drop }}/infra
+    workingDirectory: ${{ parameters.working_dir }}
+    displayName: "Publish: Save Pipeline Variables"
+
+  # We need this for dynamic tagging using Yor, so we're grabbing .git folder
+  - pwsh: |
+      $lines  = @'
+        **.git/**
+      '@
+
+      # Append to file
+      $lines -f 'string' | Add-Content -Path ${{ parameters.working_dir }}/.artifactignore
+
+      # Copy the file to the artifact directory
+      cp ${{ parameters.working_dir }}/.artifactignore ${{ parameters.artifact_drop }}/infra
+      cp ${{ parameters.working_dir }}/.artifactignore ${{ parameters.artifact_drop }}
+    workingDirectory: ${{ parameters.working_dir }}
+    displayName: "Publish: Add .git"
+
+  # We need to publish and artifact with unique name for each Build, so we're putting the timestamp
+  # This will allow for re-running of the CI stage, without having to queue a completely new build
+  - pwsh: |
+      $time = (Get-Date).ToUniversalTime().ToString("yyyyMMddTHHmmss") # UTC time so we're consistent on different build agent time
+      Write-Host "##vso[task.setvariable variable=artifact_name;]TF-$(config)-$($time)"
+    displayName: "Publish: Generate TF Artifact Name"
+
+  # Publish Artifact
+  - task: PublishPipelineArtifact@1
+    displayName: "Publish: Artifact"
+    inputs:
+      targetPath: ${{ parameters.artifact_drop }}
+      artifact: $(artifact_name)

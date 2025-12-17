@@ -1,0 +1,21 @@
+parameters:
+  - name: pat
+    type: string
+    default: ""
+
+steps:
+  - pwsh: |
+      $urls = (& git config --global --get-regexp url'\.'https://pat)
+
+      # Remove tokens
+      if(![String]::IsNullOrWhiteSpace($urls)){
+        ForEach ($url in $urls){
+          Write-Output "Removing a sensitive git url..."
+
+          & git config --global --unset $url.split(" ")[0]
+        }
+      }
+      & git config --global url."https://pat:${ENV:PAT}@dev.azure.com".insteadOf "https://dev.azure.com"
+    displayName: "Prep: Set AzDO PAT"
+    env:
+      PAT: ${{ parameters.pat }}

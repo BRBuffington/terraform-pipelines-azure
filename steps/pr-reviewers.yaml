@@ -1,0 +1,304 @@
+parameters:
+  - name: iam_team_approver_name
+    type: string
+    default: "Sec-Reader-IAMApprovers"
+
+  - name: working_dir
+    type: string
+    default: "$(System.DefaultWorkingDirectory)/infra"
+
+  - name: terraform_env
+    type: object
+    default: {}
+
+steps:
+  # Add the devops extension
+  - script: az extension add -n azure-devops
+    displayName: "Install Azure DevOps Extension"
+      
+  - pwsh: |
+      $buildID = "$(Build.BuildId)"
+      $configName = "$(config)".ToUpper()
+      $targetBranchName = "$(SYSTEM.PULLREQUEST.TARGETBRANCH)"
+      $env = $configName.split("-")[1]
+      $skipEnv = $false
+
+      Write-Output "Target Branch: $targetBranchName"
+      Write-Output "Env: $env"
+      
+      if ($targetBranchName -ne "refs/heads/main"){
+        Write-Output "Non-Main Branch Detected"
+        # We are ignoring the following environments if the target branch is not to "main", as these environments are not deployable from non-main branch
+        $skipEnvForNonMain = "sb","uat","prd","dr"
+        $checkEnv = $skipEnvForNonMain  | Where { $env -match $_ }
+
+        if(![String]::IsNullOrWhiteSpace($checkEnv)){
+          Write-Output "We're skipping"
+          $skipEnv = $true
+        }
+      }
+
+      if ($skipEnv -eq $false){
+        Write-Output "PR Reviewer check running..."
+        # Read the JSON plan file
+        $jsonPlan = Get-Content -Path "$(config).tfplan.json" -Raw | ConvertFrom-Json
+
+        $iam_team_require_approval = $false
+        $iam_rbac_table_object = @()
+
+        # Iterate over the resource_changes array in the plan
+        foreach ($change in $jsonPlan.resource_changes) {
+          $principal_id_check = $false
+          $principalID  = $null
+          $principalIDTable = $null
+          $roleName = $null
+          $scopeID = $null
+          $actions = $change.change.actions -join ","
+          $principal_display_name = $null
+
+          if ($actions -ieq "no-op"){
+            continue;
+          }
+
+          # Check if the resource is azurerm_role_assignment
+          if ($change.type -eq "azurerm_role_assignment") {
+            if ($actions -ieq "delete"){
+                $principalID = $change.change.before.principal_id
+                $principalIDTable = $principalID
+                $roleName = $change.change.before.role_definition_name
+                $scopeID = $change.change.before.scope
+
+                $principal_id_check = $true
+            }
+
+            if ($actions -ieq "create"){
+                $principalID = $change.change.after.principal_id
+                $principalIDTable = $principalID
+                $roleName = $change.change.after.role_definition_name
+                $scopeID = $change.change.after.scope
+
+                $principal_id_check = $true
+            }
+
+            if ($actions -ieq "delete,create" -OR $actions -ieq "update"){
+              $principalID = $change.change.after.principal_id
+              $principalIDTable = if($change.change.before.principal_id -ne $change.change.after.principal_id) {"$($change.change.before.principal_id) --> $($change.change.after.principal_id)"} else { "$($change.change.before.principal_id)"}
+              $roleName = if($change.change.before.role_definition_name -ne $change.change.after.role_definition_name) {"$($change.change.before.role_definition_name) --> $($change.change.after.role_definition_name)"} else { "$($change.change.before.role_definition_name)"}
+              $scopeID = if($change.change.before.scope -ne $change.change.after.scope) {"$($change.change.before.scope) --> $($change.change.after.scope)"} else { "$($change.change.before.scope)"}
+
+              $principal_id_check = $true
+            }
+          }
+
+          # Check if the resource is azurerm_synapse_role_assignment
+          if ($change.type -eq "azurerm_synapse_role_assignment") {
+            if ($actions -ieq "delete"){
+                $principalID = $change.change.before.principal_id
+                $principalIDTable = $principalID
+                $roleName = $change.change.before.role_name
+
+                if ([string]::IsNullOrWhitespace($change.change.before.synapse_workspace_id) -OR $change.change.before.synapse_workspace_id -eq ""){
+                  $scopeID = $change.change.before.synapse_spark_pool_id
+                } else {
+                  $scopeID = $change.change.before.synapse_workspace_id
+                }
+
+                $principal_id_check = $true
+            }
+
+            if ($actions -ieq "create"){
+                $principalID = $change.change.after.principal_id
+                $principalIDTable = $principalID
+                $roleName = $change.change.after.role_name
+
+                if ([string]::IsNullOrWhitespace($change.change.after.synapse_workspace_id) -OR $change.change.after.synapse_workspace_id -eq ""){
+                  $scopeID = $change.change.after.synapse_spark_pool_id
+                } else {
+                  $scopeID = $change.change.after.synapse_workspace_id
+                }
+
+                $principal_id_check = $true
+            }
+
+            if ($actions -ieq "delete,create" -OR $actions -ieq "update"){
+              $principalID = $change.change.after.principal_id
+              $principalIDTable = if($change.change.before.principal_id -ne $change.change.after.principal_id) {"$($change.change.before.principal_id) --> $($change.change.after.principal_id)"} else { "$($change.change.before.principal_id)"}
+              $roleName = if($change.change.before.role_name -ne $change.change.after.role_name) {"$($change.change.before.role_name) --> $($change.change.after.role_name)"} else { "$($change.change.before.role_name)"}
+              
+              $isSparkPool = $false
+              if ([string]::IsNullOrWhitespace($change.change.before.synapse_workspace_id) -OR $change.change.before.synapse_workspace_id -eq ""){
+                $isSparkPool = $true
+              } 
+
+              if ($isSparkPool){
+                $scopeID = if($change.change.before.synapse_spark_pool_id -ne $change.change.after.synapse_spark_pool_id) {"$($change.change.before.synapse_spark_pool_id) --> $($change.change.after.synapse_spark_pool_id)"} else { "$($change.change.before.synapse_spark_pool_id)"}
+              } else {
+                $scopeID = if($change.change.before.synapse_workspace_id -ne $change.change.after.synapse_workspace_id) {"$($change.change.before.synapse_workspace_id) --> $($change.change.after.synapse_workspace_id)"} else { "$($change.change.before.synapse_workspace_id)"}
+              }
+
+              $principal_id_check = $true
+            }
+          }
+
+          # Check if the resource is azurerm_key_vault_access_policy
+          if ($change.type -eq "azurerm_key_vault_access_policy") {
+            $roleName = "KeyVault Access Policies"
+            if ($actions -ieq "delete"){
+                $principalID = $change.change.before.object_id
+                $principalIDTable = $principalID
+                $scopeID = $change.change.before.key_vault_id
+
+                $principal_id_check = $true
+            }
+
+            if ($actions -ieq "create"){
+                $principalID = $change.change.after.object_id
+                $principalIDTable = $principalID
+                $scopeID = $change.change.after.key_vault_id
+
+                $principal_id_check = $true
+            }
+
+            if ($actions -ieq "delete,create" -OR $actions -ieq "update"){
+              $principalID = $change.change.after.object_id
+              $principalIDTable = if($change.change.before.object_id -ne $change.change.after.object_id) {"$($change.change.before.object_id) --> $($change.change.after.object_id)"} else { "$($change.change.before.object_id)"}
+              $scopeID = if($change.change.before.key_vault_id -ne $change.change.after.key_vault_id) {"$($change.change.before.key_vault_id) --> $($change.change.after.key_vault_id)"} else { "$($change.change.before.key_vault_id)"}
+
+              $principal_id_check = $true
+            }
+          }
+          
+          if ($principal_id_check -eq $true){
+            if ([string]::IsNullOrWhitespace($principalID)){
+              Write-Output "TF Address: $($change.address)"
+              Write-Output "-- Will not be able to check principal id, until this has been applied"
+            } else {
+              az login --service-principal -u $ENV:ARM_CLIENT_ID -p $ENV:ARM_CLIENT_SECRET --tenant $ENV:ARM_TENANT_ID | Out-Null
+
+              $body = @{
+                ids = @("$($principalID)")
+              } | ConvertTo-Json -Compress
+              
+              $result = az rest --method POST --url 'https://graph.microsoft.com/v1.0/directoryObjects/getByIds' --headers 'Content-Type=application/json' --body $body
+              $result = $result | ConvertFrom-JSON -Depth 10
+
+              $principal_id_type = ($result.value.'@odata.type' -split "\.")[-1]
+              $principal_display_name = $result.value.displayName
+            }
+
+            if (($principal_id_type -ieq "application") -OR ($principal_id_type -ieq "serviceprincipal")){
+              # Nothing to do, we don't need IAM team to approve this
+            } else {
+              $iam_team_require_approval = $true
+
+              # Defaults, if unknown
+              if ([string]::IsNullOrWhitespace($principalID)){ $principalIDTable = "Known after apply" }
+              if ([string]::IsNullOrWhitespace($principal_id_type)){ $principal_id_type = "Known after apply" }
+              if ([string]::IsNullOrWhitespace($principal_display_name)){ $principal_display_name = "Known after apply" }
+              if ([string]::IsNullOrWhitespace($scopeID)){ $scopeID = "TF Address: $($change.address)" }
+  
+              # Add to iam_rbac_table_object
+              $iam_rbac_table_object += [PSCustomObject]@{
+                principalID = $principalIDTable
+                principalType = if ($actions -ieq "delete,create" -OR $actions -ieq "update"){ "$($principal_id_type) (create)" } else { $principal_id_type }
+                displayName = if ($actions -ieq "delete,create" -OR $actions -ieq "update"){ "$($principal_display_name) (create)" } else { $principal_display_name }
+                actions = $actions
+                roleName = $roleName
+                scopeID = $scopeID
+              }
+            }
+          }
+        }
+
+        # Add IAM Team as reviewer & PR Comment
+        if ($iam_team_require_approval -eq $true){
+          # Define a function to convert a PowerShell object to a Markdown table row
+          function ConvertTo-MarkdownTableRow($object) {
+            $row = '|'
+            foreach ($property in $object.PSObject.Properties) {
+                $row += ' ' + $property.Value + ' |'
+            }
+            return $row
+          }
+
+          $BuildURL = "https://dev.azure.com/GuggenheimPartners/SS-Terraform-Compositions/_build/results?buildId=$($buildID)&view=results"
+
+          # Get all PR threads
+          $PRCommentThreadURL = "$(SYSTEM.TASKDEFINITIONSURI)$(SYSTEM.TEAMPROJECTID)/_apis/git/repositories/$(Build.Repository.ID)/pullRequests/$(System.PullRequest.PullRequestId)/threads?api-version=7.1-preview.1"
+          $PRCommentThreadResult = Invoke-RestMethod -Uri $PRCommentThreadURL -Method GET -Header @{Authorization = "Bearer $(System.AccessToken)";"Content-Type" = "application/json"} -ContentType "application/json"
+
+          # Filter PR comment threads
+          $PRCommentThreadIDs = ($PRCommentThreadResult.value | Where {$_.comments.content -like "*Azure RBAC Assignments*" -AND !($_.comments.content -like "*$($buildID)*")})
+          
+          # Delete old comment for RBAC
+          ForEach ($obj in $PRCommentThreadIDs){
+            ForEach ($comment in $obj.comments){
+              if ($comment.isDeleted -ne "True" -AND $comment.author.displayName -ieq "SS-Terraform-Compositions Build Service (GuggenheimPartners)"){
+                try {
+                  $PRThreadDeleteURL = "$(SYSTEM.TASKDEFINITIONSURI)$(SYSTEM.TEAMPROJECTID)/_apis/git/repositories/$(Build.Repository.ID)/pullRequests/$(System.PullRequest.PullRequestId)/threads/$($obj.id)/comments/$($comment.id)?api-version=7.1-preview.1"
+                  Invoke-RestMethod -Uri $PRThreadDeleteURL -Method DELETE -Header @{Authorization = "Bearer $(System.AccessToken)";"Content-Type" = "application/json"} -ContentType "application/json"
+                } catch {}
+              }
+            }
+          }
+
+          # Create new thread
+          $markdownTable = '## ' + "[$($buildID)]($BuildURL):" + ' Azure RBAC Assignments' + " for $($configName)" + [Environment]::NewLine
+          $markdownTable += '---' + [Environment]::NewLine
+          $markdownTable += '| ID | Type | Name | Actions | RoleName | ScopeID |' + [Environment]::NewLine
+          $markdownTable += '| ---- | --- | --- | ---- | --- | --- |' + [Environment]::NewLine
+
+          # Convert each object in the table to a Markdown table row
+          foreach ($rowObject in $iam_rbac_table_object) {
+            $markdownTable += ConvertTo-MarkdownTableRow $rowObject
+            $markdownTable += [Environment]::NewLine
+          }
+
+          $markdownTable += [Environment]::NewLine
+          $markdownTable += '_This summary table is provided as best-effort and only contains user, group, or unknown assignments. Do not reply to this comment as it is deleted every PR CI run to keep the PR comments pristine. For more details, such as when the table contains "Known after apply", review the terraform plan directly._' + [Environment]::NewLine
+
+          $markdownTable = $markdownTable -replace '"', '\"';
+
+        $PRCommentHeaderBody = @"
+        {
+          "comments": [
+            {
+              "parentCommentId": 0,
+              "content": "$markdownTable",
+              "commentType": 1,
+            }
+          ],
+          "status": 4
+        }
+      "@
+          
+          # Create PR Comment
+          $PRCommentHeaderResult = Invoke-RestMethod -Uri $PRCommentThreadURL -Method POST -Header @{Authorization = "Bearer $(System.AccessToken)";"Content-Type" = "application/json"} -Body $PRCommentHeaderBody -ContentType "application/json"
+          $PRCommentThreadID = $PRCommentHeaderResult.id
+
+          # Get the reviewer ID using REST API
+          $url = "https://vssps.dev.azure.com/GuggenheimPartners/_apis/identities?searchFilter=General&filterValue=${{ parameters.iam_team_approver_name }}&queryMembership=None&api-version=7.0"
+          $resultReviewerID = Invoke-RestMethod -Uri $url -Method Get -Header @{Authorization = "Bearer $(System.AccessToken)";"Content-Type" = "application/json"}
+          
+          $IAMReviewerID = ($resultReviewerID.value | Where {$_.providerDisplayName -like "*SS-Terraform-Compositions*"} | Select-Object -ExpandProperty id)
+
+          $reviewerJsonBody = @{
+            "isRequired" = "true"
+          } | ConvertTo-Json -Compress
+
+          # Add the IAM team as required reviewer
+          $urlPR = "$(SYSTEM.TASKDEFINITIONSURI)$(SYSTEM.TEAMPROJECTID)/_apis/git/repositories/$(Build.Repository.ID)/pullRequests/$(System.PullRequest.PullRequestId)/reviewers/$($IAMReviewerID)?api-version=7.1-preview.1"
+          $addreviewerresult = Invoke-RestMethod -Uri $urlPR -Method PUT -Header @{Authorization = "Bearer $(System.AccessToken)";"Content-Type" = "application/json"} -Body $reviewerJsonBody -ContentType "application/json"
+          
+          $addreviewerresult
+
+          # Once the PR below is merged, we can directly use az devops cli to assign required groups/users. Unfortunately, only optional reviewers are supported without the PR being merged.
+          # https://github.com/Azure/azure-devops-cli-extension/pull/1363
+          # az repos pr reviewer add --id $(System.PullRequest.PullRequestId) --reviewers "${{ parameters.iam_team_approver_name }}""
+        }
+      }
+    workingDirectory: ${{ parameters.working_dir }}
+    displayName: "PR: Reviewers"
+    continueOnError: true
+    retryCountOnTaskFailure: 2
+    env: ${{ parameters.terraform_env }}

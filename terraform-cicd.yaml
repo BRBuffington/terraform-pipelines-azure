@@ -1,0 +1,345 @@
+parameters:
+  - name: pre_run_steps
+    type: stepList
+    default: []
+
+  - name: plan_pre_run_steps
+    type: stepList
+    default: []
+
+  - name: plan_post_run_steps
+    type: stepList
+    default: []
+
+  - name: apply_pre_run_steps
+    type: stepList
+    default: []
+
+  - name: apply_post_run_steps
+    type: stepList
+    default: []
+
+  - name: configs
+    type: object
+    default: []
+
+  - name: pool
+    type: object
+    default:
+      name: "Shared-Ubuntu2004-EUS2"
+      #vmImage: ubuntu-latest
+
+  - name: backend_file
+    type: string
+    default: configs/z_backend.tfvars
+
+  - name: plan_only
+    type: string
+    default: Yes
+    values:
+      - Yes
+      - No
+
+  - name: destroy
+    type: boolean
+    default: false
+
+  - name: working_dir
+    type: string
+    default: "$(System.DefaultWorkingDirectory)/infra"
+
+  - name: ci_max_parallel_run
+    type: number
+    default: 4
+
+  - name: policy_branch_name
+    type: string
+    default: main
+
+  - name: pat
+    type: string
+    default: $(AZDO_PAT)
+
+  - name: terraform_env
+    type: object
+    default:
+      ARM_CLIENT_ID: $(az_client_id)
+      ARM_CLIENT_SECRET: $(az_client_secret)
+      ARM_TENANT_ID: "53f3dc0a-512f-4399-817d-c4a55242d086"
+      ARM_USE_AZUREAD: "1" # Any string will cause this to be true. Do not use true or false, it's bugged!
+
+  - name: pause_timeout_mins
+    type: number
+    default: 5760
+
+  - name: apply_timeout_mins
+    type: number
+    default: 60
+
+  - name: subscription_based_deployment
+    type: string
+    default: No
+    values:
+      - Yes
+      - No
+
+stages:
+  #Phase: CI
+  - template: stages/terraform-ci.yaml
+    parameters:
+      working_dir: ${{ parameters.working_dir }}
+      configs: ${{ parameters.configs }}
+      ci_max_parallel_run: ${{ parameters.ci_max_parallel_run }}
+      pool: ${{ parameters.pool }}
+      backend_file: ${{ parameters.backend_file }}
+      pre_run_steps: ${{ parameters.pre_run_steps }}
+      plan_pre_run_steps: ${{ parameters.plan_pre_run_steps }}
+      plan_post_run_steps: ${{ parameters.plan_post_run_steps }}
+      pat: ${{ parameters.pat }}
+      terraform_env: ${{ parameters.terraform_env }}
+      destroy: ${{ parameters.destroy }}
+      policy_branch_name: ${{ parameters.policy_branch_name }}
+      subscription_based_deployment: ${{ parameters.subscription_based_deployment }}
+
+  # Phase: CD
+  - ${{ if ne(variables['Build.Reason'], 'PullRequest') }}:
+      # Run it if the CI is not manually triggered or if manually triggered with the plan only set to No
+      - ? ${{ if or(eq(parameters.plan_only, 'No'),ne(variables['Build.Reason'], 'Manual')) }}
+        : # Do some prep work, this will include canceling previous deployments
+          - template: stages/pre-release.yaml
+            parameters:
+              pool: ${{ parameters.pool }}
+
+          # Let's grab all the configs in no specific order
+          # This assumes "Production" controls
+          - ${{ if eq(parameters['subscription_based_deployment'], 'Yes') }}:
+            - ${{ each config in parameters.configs }}:
+              - template: stages/terraform-cd.yaml
+                parameters:
+                  depends_on:
+                    - pre_release
+                  backend_file: ${{ parameters.backend_file }}
+                  working_dir: ${{ parameters.working_dir }}
+                  pool: ${{ parameters.pool }}
+                  pre_run_steps: ${{ parameters.pre_run_steps }}
+                  plan_pre_run_steps: ${{ parameters.plan_pre_run_steps }}
+                  plan_post_run_steps: ${{ parameters.plan_post_run_steps }}
+                  apply_pre_run_steps: ${{ parameters.apply_pre_run_steps }}
+                  apply_post_run_steps: ${{ parameters.apply_post_run_steps }}
+                  config: ${{ config }}
+                  pat: ${{ parameters.pat }}
+                  terraform_env: ${{ parameters.terraform_env }}
+                  destroy: ${{ parameters.destroy }}
+                  apply_timeout_mins: ${{ parameters.apply_timeout_mins }}
+                  pause_timeout_mins: ${{ parameters.pause_timeout_mins }}
+                  ${{ if contains(config, '-prd') }}:
+                    deployment_environment: "prd"
+                  ${{ else }}:
+                    deployment_environment: "mixed"
+                  subscription_based_deployment: ${{ parameters.subscription_based_deployment }}
+
+          - ${{ if ne(parameters['subscription_based_deployment'], 'Yes') }}:
+            # We're adding environments one by one so we can enforce order/promotion process
+            # This supports multiple region & environments
+            # Example Configs:
+            # - eus2-sbp
+            # - eus2-sbnp
+            # - cus-sbp
+            # - cus-qa
+            #
+            # Multiple PRD:
+            # - cus-prd-blue
+            # - cus-prd-green
+            # - cus-prd-red
+
+            # Put SB environments
+            # We're allowing deployment from feature & develop branch
+            - ? ${{ if or(contains(variables['Build.SOURCEBRANCH'], 'feature'),eq(variables['Build.SOURCEBRANCH'], 'refs/heads/develop')) }}
+              : - ${{ each config in parameters.configs }}:
+                    - ${{ if contains(config, '-sb') }}:
+                        - template: stages/terraform-cd.yaml
+                          parameters:
+                            backend_file: ${{ parameters.backend_file }}
+                            working_dir: ${{ parameters.working_dir }}
+                            pool: ${{ parameters.pool }}
+                            pre_run_steps: ${{ parameters.pre_run_steps }}
+                            plan_pre_run_steps: ${{ parameters.plan_pre_run_steps }}
+                            plan_post_run_steps: ${{ parameters.plan_post_run_steps }}
+                            apply_pre_run_steps: ${{ parameters.apply_pre_run_steps }}
+                            apply_post_run_steps: ${{ parameters.apply_post_run_steps }}
+                            config: ${{ config }}
+                            pat: ${{ parameters.pat }}
+                            terraform_env: ${{ parameters.terraform_env }}
+                            destroy: ${{ parameters.destroy }}
+                            apply_timeout_mins: ${{ parameters.apply_timeout_mins }}
+                            pause_timeout_mins: ${{ parameters.pause_timeout_mins }}
+                            deployment_environment: "sb"
+                            subscription_based_deployment: ${{ parameters.subscription_based_deployment }}
+
+            # Put DEV environments
+            # We're allowing deployment from feature & develop branch
+            - ? ${{ if or(contains(variables['Build.SOURCEBRANCH'], 'feature'),eq(variables['Build.SOURCEBRANCH'], 'refs/heads/develop')) }}
+              : - ${{ each config in parameters.configs }}:
+                    - ${{ if contains(config, '-dev') }}:
+                        - template: stages/terraform-cd.yaml
+                          parameters:
+                            backend_file: ${{ parameters.backend_file }}
+                            working_dir: ${{ parameters.working_dir }}
+                            pool: ${{ parameters.pool }}
+                            pre_run_steps: ${{ parameters.pre_run_steps }}
+                            plan_pre_run_steps: ${{ parameters.plan_pre_run_steps }}
+                            plan_post_run_steps: ${{ parameters.plan_post_run_steps }}
+                            apply_pre_run_steps: ${{ parameters.apply_pre_run_steps }}
+                            apply_post_run_steps: ${{ parameters.apply_post_run_steps }}
+                            config: ${{ config }}
+                            pat: ${{ parameters.pat }}
+                            terraform_env: ${{ parameters.terraform_env }}
+                            destroy: ${{ parameters.destroy }}
+                            apply_timeout_mins: ${{ parameters.apply_timeout_mins }}
+                            pause_timeout_mins: ${{ parameters.pause_timeout_mins }}
+                            deployment_environment: "dev"
+                            subscription_based_deployment: ${{ parameters.subscription_based_deployment }}
+
+            # Put SI environments
+            # We're allowing deployment from feature & develop branch
+            - ? ${{ if or(contains(variables['Build.SOURCEBRANCH'], 'feature'),eq(variables['Build.SOURCEBRANCH'], 'refs/heads/develop')) }}
+              : - ${{ each config in parameters.configs }}:
+                    - ${{ if contains(config, '-si') }}:
+                        - template: stages/terraform-cd.yaml
+                          parameters:
+                            backend_file: ${{ parameters.backend_file }}
+                            working_dir: ${{ parameters.working_dir }}
+                            pool: ${{ parameters.pool }}
+                            pre_run_steps: ${{ parameters.pre_run_steps }}
+                            plan_pre_run_steps: ${{ parameters.plan_pre_run_steps }}
+                            plan_post_run_steps: ${{ parameters.plan_post_run_steps }}
+                            apply_pre_run_steps: ${{ parameters.apply_pre_run_steps }}
+                            apply_post_run_steps: ${{ parameters.apply_post_run_steps }}
+                            config: ${{ config }}
+                            pat: ${{ parameters.pat }}
+                            terraform_env: ${{ parameters.terraform_env }}
+                            destroy: ${{ parameters.destroy }}
+                            apply_timeout_mins: ${{ parameters.apply_timeout_mins }}
+                            pause_timeout_mins: ${{ parameters.pause_timeout_mins }}
+                            deployment_environment: "si"
+                            subscription_based_deployment: ${{ parameters.subscription_based_deployment }}
+
+            # Put TST environments
+            # We're allowing deployment from feature & develop
+            - ? ${{ if or(contains(variables['Build.SOURCEBRANCH'], 'feature'),eq(variables['Build.SOURCEBRANCH'], 'refs/heads/develop')) }}
+              : - ${{ each config in parameters.configs }}:
+                    - ${{ if contains(config, '-tst') }}:
+                        - template: stages/terraform-cd.yaml
+                          parameters:
+                            backend_file: ${{ parameters.backend_file }}
+                            working_dir: ${{ parameters.working_dir }}
+                            pool: ${{ parameters.pool }}
+                            pre_run_steps: ${{ parameters.pre_run_steps }}
+                            plan_pre_run_steps: ${{ parameters.plan_pre_run_steps }}
+                            plan_post_run_steps: ${{ parameters.plan_post_run_steps }}
+                            apply_pre_run_steps: ${{ parameters.apply_pre_run_steps }}
+                            apply_post_run_steps: ${{ parameters.apply_post_run_steps }}
+                            config: ${{ config }}
+                            pat: ${{ parameters.pat }}
+                            terraform_env: ${{ parameters.terraform_env }}
+                            destroy: ${{ parameters.destroy }}
+                            apply_timeout_mins: ${{ parameters.apply_timeout_mins }}
+                            pause_timeout_mins: ${{ parameters.pause_timeout_mins }}
+                            deployment_environment: "tst"
+                            subscription_based_deployment: ${{ parameters.subscription_based_deployment }}
+
+            # Put QA environments
+            # We're allowing deployment from develop branch
+            - ${{ if eq(variables['Build.SOURCEBRANCH'], 'refs/heads/develop') }}:
+                - ${{ each config in parameters.configs }}:
+                    - ${{ if contains(config, '-qa') }}:
+                        - template: stages/terraform-cd.yaml
+                          parameters:
+                            backend_file: ${{ parameters.backend_file }}
+                            working_dir: ${{ parameters.working_dir }}
+                            pool: ${{ parameters.pool }}
+                            pre_run_steps: ${{ parameters.pre_run_steps }}
+                            plan_pre_run_steps: ${{ parameters.plan_pre_run_steps }}
+                            plan_post_run_steps: ${{ parameters.plan_post_run_steps }}
+                            apply_pre_run_steps: ${{ parameters.apply_pre_run_steps }}
+                            apply_post_run_steps: ${{ parameters.apply_post_run_steps }}
+                            config: ${{ config }}
+                            pat: ${{ parameters.pat }}
+                            terraform_env: ${{ parameters.terraform_env }}
+                            destroy: ${{ parameters.destroy }}
+                            apply_timeout_mins: ${{ parameters.apply_timeout_mins }}
+                            pause_timeout_mins: ${{ parameters.pause_timeout_mins }}
+                            deployment_environment: "qa"
+                            subscription_based_deployment: ${{ parameters.subscription_based_deployment }}
+
+            # Put UAT environments
+            # We're allowing deployment from main branch
+            - ${{ if eq(variables['Build.SOURCEBRANCH'], 'refs/heads/main') }}:
+                - ${{ each config in parameters.configs }}:
+                    - ${{ if contains(config, '-uat') }}:
+                        - template: stages/terraform-cd.yaml
+                          parameters:
+                            backend_file: ${{ parameters.backend_file }}
+                            working_dir: ${{ parameters.working_dir }}
+                            pool: ${{ parameters.pool }}
+                            pre_run_steps: ${{ parameters.pre_run_steps }}
+                            plan_pre_run_steps: ${{ parameters.plan_pre_run_steps }}
+                            plan_post_run_steps: ${{ parameters.plan_post_run_steps }}
+                            apply_pre_run_steps: ${{ parameters.apply_pre_run_steps }}
+                            apply_post_run_steps: ${{ parameters.apply_post_run_steps }}
+                            config: ${{ config }}
+                            pat: ${{ parameters.pat }}
+                            terraform_env: ${{ parameters.terraform_env }}
+                            destroy: ${{ parameters.destroy }}
+                            apply_timeout_mins: ${{ parameters.apply_timeout_mins }}
+                            pause_timeout_mins: ${{ parameters.pause_timeout_mins }}
+                            deployment_environment: "uat"
+                            subscription_based_deployment: ${{ parameters.subscription_based_deployment }}
+
+            # Put PRD environments
+            # We're allowing deployment from main branch
+            - ${{ if eq(variables['Build.SOURCEBRANCH'], 'refs/heads/main') }}:
+                - ${{ each config in parameters.configs }}:
+                    - ${{ if contains(config, '-prd') }}:
+                        - template: stages/terraform-cd.yaml
+                          parameters:
+                            backend_file: ${{ parameters.backend_file }}
+                            working_dir: ${{ parameters.working_dir }}
+                            pool: ${{ parameters.pool }}
+                            pre_run_steps: ${{ parameters.pre_run_steps }}
+                            plan_pre_run_steps: ${{ parameters.plan_pre_run_steps }}
+                            plan_post_run_steps: ${{ parameters.plan_post_run_steps }}
+                            apply_pre_run_steps: ${{ parameters.apply_pre_run_steps }}
+                            apply_post_run_steps: ${{ parameters.apply_post_run_steps }}
+                            config: ${{ config }}
+                            pat: ${{ parameters.pat }}
+                            terraform_env: ${{ parameters.terraform_env }}
+                            destroy: ${{ parameters.destroy }}
+                            apply_timeout_mins: ${{ parameters.apply_timeout_mins }}
+                            pause_timeout_mins: ${{ parameters.pause_timeout_mins }}
+                            deployment_environment: "prd"
+                            subscription_based_deployment: ${{ parameters.subscription_based_deployment }}
+
+            # Put DR environments
+            # We're allowing deployment from main branch
+            - ${{ if eq(variables['Build.SOURCEBRANCH'], 'refs/heads/main') }}:
+                - ${{ each config in parameters.configs }}:
+                    - ${{ if contains(config, '-dr') }}:
+                        - template: stages/terraform-cd.yaml
+                          parameters:
+                            backend_file: ${{ parameters.backend_file }}
+                            working_dir: ${{ parameters.working_dir }}
+                            pool: ${{ parameters.pool }}
+                            pre_run_steps: ${{ parameters.pre_run_steps }}
+                            plan_pre_run_steps: ${{ parameters.plan_pre_run_steps }}
+                            plan_post_run_steps: ${{ parameters.plan_post_run_steps }}
+                            apply_pre_run_steps: ${{ parameters.apply_pre_run_steps }}
+                            apply_post_run_steps: ${{ parameters.apply_post_run_steps }}
+                            config: ${{ config }}
+                            pat: ${{ parameters.pat }}
+                            terraform_env: ${{ parameters.terraform_env }}
+                            destroy: ${{ parameters.destroy }}
+                            apply_timeout_mins: ${{ parameters.apply_timeout_mins }}
+                            pause_timeout_mins: ${{ parameters.pause_timeout_mins }}
+                            deployment_environment: "dr"
+                            subscription_based_deployment: ${{ parameters.subscription_based_deployment }}

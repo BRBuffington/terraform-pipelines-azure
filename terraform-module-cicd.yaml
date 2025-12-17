@@ -1,0 +1,92 @@
+parameters:
+  - name: pool
+    type: object
+    default:
+      vmImage: ubuntu-latest
+
+  - name: pat
+    type: string
+    default: $(AZDO_PAT)
+
+  - name: run_tf_tests
+    type: string
+    default: Yes
+    values:
+      - Yes
+      - No
+
+  - name: terraform_env
+    type: object
+    default:
+      ARM_CLIENT_ID: $(az_client_id)
+      ARM_CLIENT_SECRET: $(az_client_secret)
+      ARM_USE_AZUREAD: "1" # Any string will cause this to be true. Do not use true or false, it's bugged!
+
+stages:
+  - stage: CI
+    jobs:
+      - ${{ if eq(parameters.run_tf_tests, 'Yes') }}:
+        - job: terraform_test
+          displayName: Terraform Test
+          pool: ${{ parameters.pool }}
+          steps:
+            - template: steps/terraform-version.yaml
+              parameters:
+                working_dir: $(Build.SourcesDirectory)
+
+            - pwsh: |
+                if (Test-Path "tests") {
+                  terraform test
+                } else {
+                  Write-Host "No tests directory found. Skipping."
+                }
+              env: ${{ parameters.terraform_env }}
+              displayName: 'CI: Terraform Test'
+      - ${{ if eq(parameters.run_tf_tests, 'No') }}:
+        - job: placeholder_no_other_tests
+          displayName: Tests Skipped
+          pool: ${{ parameters.pool }}
+          steps:
+            - checkout: none
+            - pwsh: |
+                Write-Host "Terraform Test skipped... No additional tests have been added today"
+              env: ${{ parameters.terraform_env }}
+              displayName: 'CI: Tests Skipped'
+
+  - ${{ if ne(variables['Build.Reason'], 'PullRequest') }}:
+    - stage: CD
+      jobs:
+        - job: release_tag
+          displayName: Tagging Artifact
+          pool: ${{ parameters.pool }}
+          steps:
+            - checkout: self
+              persistCredentials: true
+
+            - task: gitversion/setup@0
+              displayName: Install GitVersion
+              inputs:
+                versionSpec: '5.x'
+
+            - task: gitversion/execute@0
+              displayName: Determine Version
+              inputs:
+                useConfigFile: true
+                configFilePath: "$(Build.SourcesDirectory)/.azuredevops/auto-tagger.yaml"
+
+            - script: echo "Updating build version to $(GitVersion.SemVer)"
+              displayName: 'Set build version'
+              env:
+                Action: '##vso[build.updatebuildnumber]'
+                BuildVersion: $(GitVersion.SemVer)
+
+            - pwsh: |
+                git config --global url."https://pat:${ENV:PAT}@dev.azure.com".insteadOf "https://dev.azure.com"
+                git config --global user.email "noreply@guggenheimpartners.com"
+                git config --global user.name "Auto-Tagger"
+                git tag -a 'v$(GitVersion.SemVer)' -m 'Auto-Tagged'
+                git push --tags
+              workingDirectory: $(Build.SourcesDirectory)
+              displayName: "CD: Release Tag"
+              env:
+                PAT: $(AZDO_PAT)

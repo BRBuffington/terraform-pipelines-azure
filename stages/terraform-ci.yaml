@@ -1,0 +1,196 @@
+parameters:
+  - name: pre_run_steps
+    type: stepList
+    default: []
+
+  - name: plan_pre_run_steps
+    type: stepList
+    default: []
+
+  - name: plan_post_run_steps
+    type: stepList
+    default: []
+
+  - name: configs
+    type: object
+    default: []
+
+  - name: pool
+    type: object
+    default: []
+
+  - name: backend_file
+    type: string
+    default: configs/z_backend.tfvars
+
+  - name: ci_max_parallel_run
+    type: number
+    default: 3
+
+  - name: artifact_drop
+    type: string
+    default: "$(Build.ArtifactStagingDirectory)/infra"
+
+  - name: working_dir
+    type: string
+    default: "$(System.DefaultWorkingDirectory)/infra"
+
+  - name: policy_branch_name
+    type: string
+    default: main
+
+  - name: pat
+    type: string
+    default: ""
+
+  - name: terraform_env
+    type: object
+    default: {}
+
+  - name: destroy
+    type: boolean
+    default: false
+
+  - name: subscription_based_deployment
+    type: string
+    default: No
+    values:
+      - Yes
+      - No
+
+stages:
+  # Phase: CI
+  - stage: checks_plan
+    displayName: "Checks & Plans"
+    jobs:
+      # Loop through each config
+      - ${{ each config in parameters.configs }}:
+        # Job for each config
+        - job: plan_${{ replace( config, '-', '_') }}
+          displayName: "Plan ${{ config }}"
+          ${{ if eq(parameters['subscription_based_deployment'], 'No') }}: # We're only going to filter if it's environment-based deployment
+            condition: |
+              not(
+                and(
+                  or(
+                    contains( '${{ config }}', '-sb'),
+                    contains( '${{ config }}', '-dev'),
+                    contains( '${{ config }}', '-tst'),
+                    contains( '${{ config }}', '-si'),
+                    contains( '${{ config }}', '-qa')
+                    ),
+                  or(
+                    eq(variables['BUILD.SOURCEBRANCH'], 'refs/heads/main'),
+                    eq(variables['SYSTEM.PULLREQUEST.TARGETBRANCH'], 'refs/heads/main')
+                  )
+                )
+              )
+          pool: ${{ parameters.pool }}
+          variables:
+            config: ${{ config }}
+            DISABLE_NODE6_DEPRECATION_WARNING: true
+          steps:
+            # Checks
+            - ${{ if eq(parameters['subscription_based_deployment'], 'No') }}:
+              - template: ../steps/config-checks.yaml
+
+            # Run the pre-run steps (Same for plan and apply)
+            - ${{ parameters.pre_run_steps }}
+
+            # Run the pre-run steps
+            - ${{ parameters.plan_pre_run_steps }}
+
+            # Copy the RAW Terraform to a sub directory
+            # We only need this if we're deploying, so ignore PRs
+            # This will be published, so we need the RAW files before interpolations for the TFVARs (which may contain secret)
+            - ${{ if ne(variables['Build.Reason'], 'PullRequest') }}:
+                - task: CopyFiles@2
+                  displayName: "Prep: Save TF Code"
+                  inputs:
+                    Contents: |
+                      **/infra/**
+                      **.git/**
+                    TargetFolder: ${{ parameters.artifact_drop }}
+                    SourceFolder: "$(System.DefaultWorkingDirectory)"
+                    OverWrite: true
+                    retryCount: 5
+
+            # Git Configs
+            - template: ../steps/git-config.yaml
+              parameters:
+                pat: ${{ parameters.pat }}
+
+            # Initialize Terraform
+            - template: ../steps/terraform-init.yaml
+              parameters:
+                backend_file: ${{ parameters.backend_file }}
+                working_dir: ${{ parameters.working_dir }}
+                terraform_env: ${{ parameters.terraform_env }}
+                subscription_based_deployment: ${{ parameters.subscription_based_deployment }}
+
+            - ${{ if ne(parameters['destroy'], 'true') }}:
+              # Dynamically Tag Resources
+              - template: ../steps/tagging.yaml
+                parameters:
+                  working_dir: ${{ parameters.working_dir }}
+
+            - ${{ if ne(parameters['destroy'], 'true') }}:
+              # Policy Checks (Pre-Plan)
+              - template: ../steps/policies.yaml
+                parameters:
+                  working_dir: ${{ parameters.working_dir }}
+                  policy_branch_name: ${{ parameters.policy_branch_name }}
+                  phase: pre-plan
+
+            # Terraform Plan
+            - template: ../steps/terraform-plan.yaml
+              parameters:
+                artifact_drop: ${{ parameters.artifact_drop }}
+                working_dir: ${{ parameters.working_dir }}
+                terraform_env: ${{ parameters.terraform_env }}
+                destroy: ${{ parameters.destroy }}
+
+            - ${{ if ne(parameters['destroy'], 'true') }}:
+              # Run Checkov
+              - template: ../steps/checkov.yaml
+                parameters:
+                  working_dir: ${{ parameters.working_dir }}
+                  terraform_env: ${{ parameters.terraform_env }}
+
+            - ${{ if ne(parameters['destroy'], 'true') }}:
+              # Policy Checks (Plan)
+              - template: ../steps/policies.yaml
+                parameters:
+                  working_dir: ${{ parameters.working_dir }}
+                  policy_branch_name: ${{ parameters.policy_branch_name }}
+                  phase: post-plan
+
+            # Generate Summary
+            - template: ../steps/summary.yaml
+              parameters:
+                working_dir: ${{ parameters.working_dir }}
+
+            # We only need this if we're deploying, so ignore PRs
+            - ${{ if ne(variables['Build.Reason'], 'PullRequest') }}:
+                # Publish the artifact of the terraform plan output file (tfplan)
+                - template: ../steps/publish-artifact.yaml
+                  parameters:
+                    working_dir: ${{ parameters.working_dir }}
+                    artifact_drop: ${{ parameters.artifact_drop }}
+
+            # Only for PRs
+            - ${{ if eq(variables['Build.Reason'], 'PullRequest') }}:
+              - template: ../steps/pr-reviewers.yaml
+                parameters:
+                  working_dir: ${{ parameters.working_dir }}
+                  terraform_env: ${{ parameters.terraform_env }}
+
+            # Run the post-run steps
+            - ${{ parameters.plan_post_run_steps }}
+
+            # Delete all the files in the build directory
+            - task: DeleteFiles@1
+              displayName: "Post-job: Clean Up"
+              inputs:
+                Contents: "working_dir: ${{ parameters.working_dir }}/**"
+                working_dir: ${{ parameters.working_dir }}

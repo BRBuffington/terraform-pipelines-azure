@@ -1,0 +1,34 @@
+steps:
+  - pwsh: |
+      $config = "$(config)"
+      $AllowedEnvPrefix = "sb","dev","tst","si","qa","uat","prd","dr"
+
+      if(![String]::IsNullOrWhiteSpace($config)){
+        # Check format
+        $FormatCheck = $config.split('-')
+
+        if ($FormatCheck.count -lt 2){
+          Write-Host "##vso[task.logissue type=error]$config | Format must be [region alias]-[environment alias][-designator (optional)]"
+          Write-Host "##vso[task.complete result=Failed;]$config | Format must be [region alias]-[environment alias][-designator (optional)]"
+        } else {
+          $env = $config.split("-")[1]
+
+          if(![String]::IsNullOrWhiteSpace($env)){
+            $CheckEnv = $AllowedEnvPrefix  | Where { $env -match $_ }
+
+            if([String]::IsNullOrWhiteSpace($CheckEnv)){
+              Write-Host "##vso[task.logissue type=error]$config | Environment alias is not valid. Allowed: [$($AllowedEnvPrefix -join ", ")]"
+              Write-Host "##vso[task.complete result=Failed;]$config | Environment alias is not valid. Allowed: [$($AllowedEnvPrefix -join ", ")]"
+            }
+          } else {
+            Write-Host "##vso[task.logissue type=error]$config | Cannot detect the environment alias!"
+            Write-Host "##vso[task.complete result=Failed;]$config | Cannot detect the environment alias!"
+          }
+        }
+      } else {
+          Write-Host "##vso[task.logissue type=error]$config | Config name not valid!"
+          Write-Host "##vso[task.complete result=Failed;]$config | Config name not valid!"
+      }
+    workingDirectory: ${{ parameters.working_dir }}
+    displayName: "Check: Config/Tfvar Name"
+
