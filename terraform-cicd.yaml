@@ -65,7 +65,7 @@ parameters:
     default:
       ARM_CLIENT_ID: $(az_client_id)
       ARM_CLIENT_SECRET: $(az_client_secret)
-      ARM_TENANT_ID: "53f3dc0a-512f-4399-817d-c4a55242d086"
+      ARM_TENANT_ID: "00000000-0000-0000-0000-000000000000"
       ARM_USE_AZUREAD: "1" # Any string will cause this to be true. Do not use true or false, it's bugged!
 
   - name: pause_timeout_mins
