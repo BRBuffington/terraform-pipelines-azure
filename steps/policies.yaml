@@ -25,7 +25,7 @@ parameters:
 
   - name: policy_repo_name
     type: string
-    default: terraform-opa-policies
+    default: your-opa-policies-repo
 
 steps:
   - ${{ if ne(parameters.phase, 'pre-plan') }}:
