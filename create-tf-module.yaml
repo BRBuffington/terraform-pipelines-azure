@@ -10,7 +10,7 @@ parameters:
   - name: org_name
     displayName: AzDO Organization Name
     type: string
-    default: GuggenheimPartners
+    default: your-org
 
   - name: project_name
     displayName: AzDO Project Name
@@ -58,7 +58,7 @@ jobs:
             $Repo = az repos create --name "$module_name" --organization https://dev.azure.com/${{ parameters.org_name }} --project "${{ parameters.project_name }}"
 
             # Set your git config email and user
-            git config --global user.email "noreply@guggenheimpartners.com"
+            git config --global user.email "noreply@example.com"
             git config --global user.name "IT Cloud Engineering"
             git config --global init.defaultBranch "main"
 
@@ -72,7 +72,7 @@ jobs:
             git commit -am "Cloned from zzTemplate.Modules repository"
 
             # Add new remote
-            git remote add origin "https://${{ parameters.pat }}@dev.azure.com/GuggenheimPartners/${{ parameters.project_name }}/_git/$module_name"
+            git remote add origin "https://${{ parameters.pat }}@dev.azure.com/${{ parameters.azure_devops_org }}/${{ parameters.project_name }}/_git/$module_name"
 
             # Push the changes
             git push -u origin --all

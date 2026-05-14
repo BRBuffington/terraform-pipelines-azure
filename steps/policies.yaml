@@ -17,7 +17,7 @@ parameters:
 
   - name: policy_repo_org
     type: string
-    default: GuggenheimPartners
+    default: your-org
 
   - name: policy_repo_project
     type: string
@@ -44,9 +44,9 @@ steps:
         $opa_input += @{"tfrun" = $tfrun}
 
         # Let's create the opa json
-        $opa_input | ConvertTo-Json -Depth 100 | Set-Content "gugg-opa.json"
+        $opa_input | ConvertTo-Json -Depth 100 | Set-Content "tf-opa.json"
 
-        Get-Content "gugg-opa.json"
+        Get-Content "tf-opa.json"
       workingDirectory: ${{ parameters.working_dir }}
       displayName: "Policies: Generate OPA JSON"
 
@@ -93,7 +93,7 @@ steps:
           if (Test-Path "policy/post-plan/"){$policy_folder = "policy/post-plan/"}
           'Policy Check (Post-Plan)' | tee -a "conftest_$($CONFIG_NAME)"
 
-          $(& $CONFTEST test --policy $policy_folder "gugg-opa.json" --output=$policy_output --data policy/shared-data.yaml --all-namespaces --fail-on-warn; $EXITCODE = $LASTEXITCODE) | tee -a "conftest_$($CONFIG_NAME)"
+          $(& $CONFTEST test --policy $policy_folder "tf-opa.json" --output=$policy_output --data policy/shared-data.yaml --all-namespaces --fail-on-warn; $EXITCODE = $LASTEXITCODE) | tee -a "conftest_$($CONFIG_NAME)"
         }
 
         # Conftest exit codes:

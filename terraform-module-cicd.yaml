@@ -82,7 +82,7 @@ stages:
 
             - pwsh: |
                 git config --global url."https://pat:${ENV:PAT}@dev.azure.com".insteadOf "https://dev.azure.com"
-                git config --global user.email "noreply@guggenheimpartners.com"
+                git config --global user.email "noreply@example.com"
                 git config --global user.name "Auto-Tagger"
                 git tag -a 'v$(GitVersion.SemVer)' -m 'Auto-Tagged'
                 git push --tags

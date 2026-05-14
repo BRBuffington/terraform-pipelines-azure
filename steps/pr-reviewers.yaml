@@ -221,7 +221,7 @@ steps:
             return $row
           }
 
-          $BuildURL = "https://dev.azure.com/GuggenheimPartners/SS-Terraform-Compositions/_build/results?buildId=$($buildID)&view=results"
+          $BuildURL = "https://dev.azure.com/<your-org>/<your-project>/_build/results?buildId=$($buildID)&view=results"
 
           # Get all PR threads
           $PRCommentThreadURL = "$(SYSTEM.TASKDEFINITIONSURI)$(SYSTEM.TEAMPROJECTID)/_apis/git/repositories/$(Build.Repository.ID)/pullRequests/$(System.PullRequest.PullRequestId)/threads?api-version=7.1-preview.1"
@@ -233,7 +233,7 @@ steps:
           # Delete old comment for RBAC
           ForEach ($obj in $PRCommentThreadIDs){
             ForEach ($comment in $obj.comments){
-              if ($comment.isDeleted -ne "True" -AND $comment.author.displayName -ieq "SS-Terraform-Compositions Build Service (GuggenheimPartners)"){
+              if ($comment.isDeleted -ne "True" -AND $comment.author.displayName -ieq "${{ parameters.project_name }} Build Service (${{ parameters.azure_devops_org }})"){
                 try {
                   $PRThreadDeleteURL = "$(SYSTEM.TASKDEFINITIONSURI)$(SYSTEM.TEAMPROJECTID)/_apis/git/repositories/$(Build.Repository.ID)/pullRequests/$(System.PullRequest.PullRequestId)/threads/$($obj.id)/comments/$($comment.id)?api-version=7.1-preview.1"
                   Invoke-RestMethod -Uri $PRThreadDeleteURL -Method DELETE -Header @{Authorization = "Bearer $(System.AccessToken)";"Content-Type" = "application/json"} -ContentType "application/json"
@@ -277,10 +277,10 @@ steps:
           $PRCommentThreadID = $PRCommentHeaderResult.id
 
           # Get the reviewer ID using REST API
-          $url = "https://vssps.dev.azure.com/GuggenheimPartners/_apis/identities?searchFilter=General&filterValue=${{ parameters.iam_team_approver_name }}&queryMembership=None&api-version=7.0"
+          $url = "https://vssps.dev.azure.com/<your-org>/_apis/identities?searchFilter=General&filterValue=${{ parameters.iam_team_approver_name }}&queryMembership=None&api-version=7.0"
           $resultReviewerID = Invoke-RestMethod -Uri $url -Method Get -Header @{Authorization = "Bearer $(System.AccessToken)";"Content-Type" = "application/json"}
           
-          $IAMReviewerID = ($resultReviewerID.value | Where {$_.providerDisplayName -like "*SS-Terraform-Compositions*"} | Select-Object -ExpandProperty id)
+          $IAMReviewerID = ($resultReviewerID.value | Where {$_.providerDisplayName -like "*your-project*"} | Select-Object -ExpandProperty id)
 
           $reviewerJsonBody = @{
             "isRequired" = "true"

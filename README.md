@@ -7,9 +7,9 @@ This repository contains azure devops pipeline template for terraform; it will b
 * Terraform Validate
 * Terraform CICD
 
-A composition repository template can be found [here](https://dev.azure.com/GuggenheimPartners/SS-Terraform-Compositions/_git/zzTemplate.Terraform).
+A composition repository template can be found [here](https://dev.azure.com/<your-org>/<your-project>/_git/zzTemplate.Terraform).
 
-To jumpstart terraform compositions, a [runbook](https://dev.azure.com/GuggenheimPartners/SS-Terraform-Compositions/_build?definitionId=20) has been created that will create all the required pipelines, branch policies, and bare-bones terraform composition repo.
+To jumpstart terraform compositions, a [runbook](https://dev.azure.com/<your-org>/<your-project>/_build?definitionId=20) has been created that will create all the required pipelines, branch policies, and bare-bones terraform composition repo.
 
 # Pipeline Templates
 
